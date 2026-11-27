@@ -1,5 +1,5 @@
 PackageIdentifier: Jax-Lifu.adbx
-PackageVersion: 0.0.1
+PackageVersion: 0.0.2
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
@@ -7,7 +7,7 @@ NestedInstallerFiles:
     PortableCommandAlias: adbx
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-x86_64-pc-windows-msvc.zip
-    InstallerSha256: A080CE8DEFED0E6CD7B4FF580BF0E5FDD049DE72827A4CE7CDD3FD55DF5FA666
+    InstallerUrl: https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.2/adbx-v0.0.2-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 25B6B914D402F82F9A46511B358B2D68136A5289374D0B9342A55B0AB50D0FAF
 ManifestType: installer
 ManifestVersion: 1.6.0

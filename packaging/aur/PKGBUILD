@@ -1,5 +1,5 @@
 pkgname=adbx-bin
-pkgver=0.0.1
+pkgver=0.0.2
 pkgrel=1
 pkgdesc="Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP"
 arch=('x86_64' 'aarch64')
@@ -8,10 +8,10 @@ license=('MIT')
 depends=('android-tools')
 provides=('adbx')
 conflicts=('adbx')
-source_x86_64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-x86_64-unknown-linux-musl.tar.gz")
-source_aarch64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('e96803d02c6f7e191bb3b7580d2ff59f7dea0fe6210b6559e189a4ef22221fb1')
-sha256sums_aarch64=('bb6c3d86d937cbb51e3d62087b352eba918fbf7df4b6f144705887a6ef20169d')
+source_x86_64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.2/adbx-v0.0.2-x86_64-unknown-linux-musl.tar.gz")
+source_aarch64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.2/adbx-v0.0.2-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('7586348569c9896231d0672e0cfb177531dc643e75b5b9cded4c07d9a4d2d824')
+sha256sums_aarch64=('129ce655a522f04bf14e3e87a0f0153837451e2eb32161e0a9d1028008982a46')
 
 package() {
   install -Dm755 "${srcdir}/adbx" "${pkgdir}/usr/bin/adbx"

@@ -5,8 +5,8 @@ $toolsDir = "$(Split-Path -Parent $MyInvocation.MyCommand.Definition)"
 $packageArgs = @{
   packageName    = $env:ChocolateyPackageName
   unzipLocation  = $toolsDir
-  url64bit       = 'https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-x86_64-pc-windows-msvc.zip'
-  checksum64     = 'a080ce8defed0e6cd7b4ff580bf0e5fdd049de72827a4ce7cdd3fd55df5fa666'
+  url64bit       = 'https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.2/adbx-v0.0.2-x86_64-pc-windows-msvc.zip'
+  checksum64     = '25b6b914d402f82f9a46511b358b2d68136a5289374d0b9342a55b0ab50d0faf'
   checksumType64 = 'sha256'
 }
 
