@@ -1,5 +1,5 @@
 pkgname=adbx-bin
-pkgver=0.0.3
+pkgver=0.0.4
 pkgrel=1
 pkgdesc="Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP"
 arch=('x86_64' 'aarch64')
@@ -8,10 +8,10 @@ license=('MIT')
 depends=('android-tools')
 provides=('adbx')
 conflicts=('adbx')
-source_x86_64=("https://github.com/qytech/adbx-rs/releases/download/v0.0.3/adbx-v0.0.3-x86_64-unknown-linux-musl.tar.gz")
-source_aarch64=("https://github.com/qytech/adbx-rs/releases/download/v0.0.3/adbx-v0.0.3-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('c9f8221372802dcd9411d80a06c8b54c964fd8139319f7878ee9df678807a012')
-sha256sums_aarch64=('5023751e58576980aabca513876a16c253c529f66ed4a1d9bdb567f266060065')
+source_x86_64=("https://github.com/qytech/adbx-rs/releases/download/v0.0.4/adbx-v0.0.4-x86_64-unknown-linux-musl.tar.gz")
+source_aarch64=("https://github.com/qytech/adbx-rs/releases/download/v0.0.4/adbx-v0.0.4-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('8f1709513269729b05c507c660aae4ce3918437b703ae938f02e69f1dc49de5a')
+sha256sums_aarch64=('058736cfda2c39e47bcce5370be6af243bd13fad508ec94e4b6a49fe94866700')
 
 package() {
   install -Dm755 "${srcdir}/adbx" "${pkgdir}/usr/bin/adbx"
