@@ -237,7 +237,7 @@ fn complete_remote_paths(serial: &str, token: &str) -> Vec<CompletionCandidate> 
         &adb_path,
         Some(serial),
         &["shell".into(), ls_cmd],
-        1,
+        2,
     ) else {
         return Vec::new();
     };

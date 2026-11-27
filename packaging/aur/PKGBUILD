@@ -7,10 +7,10 @@ url="https://github.com/Jax-Lifu/adbx-rs"
 license=('MIT')
 provides=('adbx')
 conflicts=('adbx')
-source_x86_64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v${pkgver}/adbx-v${pkgver}-x86_64-unknown-linux-musl.tar.gz")
-source_aarch64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v${pkgver}/adbx-v${pkgver}-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('REPLACE_WITH_LINUX_X86_64_SHA256')
-sha256sums_aarch64=('REPLACE_WITH_LINUX_ARM64_SHA256')
+source_x86_64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-x86_64-unknown-linux-musl.tar.gz")
+source_aarch64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('e96803d02c6f7e191bb3b7580d2ff59f7dea0fe6210b6559e189a4ef22221fb1')
+sha256sums_aarch64=('bb6c3d86d937cbb51e3d62087b352eba918fbf7df4b6f144705887a6ef20169d')
 
 package() {
   install -Dm755 "${srcdir}/adbx" "${pkgdir}/usr/bin/adbx"

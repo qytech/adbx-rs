@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL_SECS: u64 = 5;
-const TIMEOUT_MS: u64 = 300;
+const TIMEOUT_MS: u64 = 1500;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {

@@ -273,6 +273,16 @@ impl AppState {
         self.entries.push_back(entry);
         if matched {
             self.filtered_seqs.push_back(seq);
+            if self.paused {
+                self.scroll_from_bottom = self
+                    .scroll_from_bottom
+                    .saturating_add(1)
+                    .min(self.filtered_seqs.len().saturating_sub(1));
+            }
+        } else if self.paused {
+            self.scroll_from_bottom = self
+                .scroll_from_bottom
+                .min(self.filtered_seqs.len().saturating_sub(1));
         }
     }
 
@@ -358,8 +368,9 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
     let package_name = Arc::new(RwLock::new(opts.package.clone()));
     let tracked_pids = Arc::new(RwLock::new(HashSet::<String>::new()));
     let pids_version = Arc::new(AtomicU64::new(0));
+    let pkg_change_ver = Arc::new(AtomicU64::new(0));
 
-    // 1. 后台线程：按包名自动追踪 PID
+    // 1. 后台线程：按包名/进程正则自动追踪 PID
     {
         let stop = Arc::clone(&stop_flag);
         let adb_path = opts.adb_path.clone();
@@ -367,12 +378,14 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
         let pkg_ref = Arc::clone(&package_name);
         let pids_ref = Arc::clone(&tracked_pids);
         let ver_ref = Arc::clone(&pids_version);
+        let change_ref = Arc::clone(&pkg_change_ver);
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
+                let last_change = change_ref.load(Ordering::Relaxed);
                 let maybe_pkg = pkg_ref.read().unwrap().clone();
                 let new_pids = match maybe_pkg {
-                    Some(pkg) if adb::validate_package_name(&pkg).is_ok() => {
-                        fetch_package_pids(&adb_path, &serial, &pkg).unwrap_or_default()
+                    Some(pkg) if !pkg.trim().is_empty() => {
+                        fetch_matching_pids(&adb_path, &serial, &pkg)
                     }
                     _ => HashSet::new(),
                 };
@@ -384,7 +397,7 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
                     }
                 }
                 for _ in 0..20 {
-                    if stop.load(Ordering::Relaxed) {
+                    if stop.load(Ordering::Relaxed) || change_ref.load(Ordering::Relaxed) != last_change {
                         break;
                     }
                     thread::sleep(Duration::from_millis(100));
@@ -529,6 +542,10 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
                             state.paused = !state.paused;
                             if !state.paused {
                                 state.scroll_from_bottom = 0;
+                                state.status_notice = "已恢复实时滚动 (LIVE)".to_string();
+                            } else {
+                                state.status_notice =
+                                    "已暂停滚动（后台继续采集，按 Space 或 G 恢复实时）".to_string();
                             }
                         }
                         KeyCode::Char('h') => {
@@ -619,9 +636,17 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
                                         state.exclude_text = val;
                                     }
                                     InputMode::EditPackage => {
-                                        *state.package_name.write().unwrap() =
-                                            if val.is_empty() { None } else { Some(val) };
-                                        state.tracked_pids.write().unwrap().clear();
+                                        if val.is_empty() {
+                                            *state.package_name.write().unwrap() = None;
+                                            state.tracked_pids.write().unwrap().clear();
+                                            pkg_change_ver.fetch_add(1, Ordering::Relaxed);
+                                        } else if let Err(e) = RegexBuilder::new(&val).case_insensitive(true).build() {
+                                            state.status_notice = format!("包名正则无效: {e}");
+                                        } else {
+                                            *state.package_name.write().unwrap() = Some(val);
+                                            state.tracked_pids.write().unwrap().clear();
+                                            pkg_change_ver.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                     InputMode::Normal => {}
                                 }
@@ -803,7 +828,7 @@ fn draw_ui(
     let footer_text = match state.mode {
         InputMode::EditInclude => format!("包含正则 (/): {}_", state.input_buf),
         InputMode::EditExclude => format!("排除正则 (!): {}_", state.input_buf),
-        InputMode::EditPackage => format!("目标包名 (p，留空看全部): {}_", state.input_buf),
+        InputMode::EditPackage => format!("包名/进程正则 (p，留空看全部): {}_", state.input_buf),
         InputMode::Normal => {
             if !state.status_notice.is_empty() {
                 format!(
@@ -826,21 +851,91 @@ fn draw_ui(
     f.render_widget(footer, chunks[2]);
 }
 
-fn fetch_package_pids(adb_path: &PathBuf, serial: &str, pkg: &str) -> Option<HashSet<String>> {
-    let output = Command::new(adb_path)
-        .args(["-s", serial, "shell", "pidof", pkg])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return Some(HashSet::new());
+/// 从 `ps -A -o PID,NAME` 或 `ps` 输出中按正则匹配进程名并返回对应的 PID 集合
+pub fn parse_ps_pids_matching(ps_output: &str, pattern: &str) -> HashSet<String> {
+    let trimmed = pattern.trim();
+    let Ok(re) = RegexBuilder::new(trimmed).case_insensitive(true).build() else {
+        return HashSet::new();
+    };
+    if trimmed.is_empty() {
+        return HashSet::new();
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pids = stdout
-        .split_whitespace()
-        .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
-        .map(|s| s.to_string())
-        .collect();
-    Some(pids)
+
+    let mut pids = HashSet::new();
+    for line in ps_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 2 {
+            continue;
+        }
+        if matches!(tokens[0], "PID" | "USER" | "UID") {
+            continue;
+        }
+        let (pid, proc_name) = if tokens[0].chars().all(|c| c.is_ascii_digit()) {
+            (tokens[0], tokens[tokens.len() - 1])
+        } else if let Some(pid_tok) = tokens.iter().skip(1).find(|t| t.chars().all(|c| c.is_ascii_digit())) {
+            (*pid_tok, tokens[tokens.len() - 1])
+        } else {
+            continue;
+        };
+        if re.is_match(proc_name) {
+            pids.insert(pid.to_string());
+        }
+    }
+    pids
+}
+
+/// 按包名/进程正则获取设备上匹配的 PID 列表（优先 `ps -A -o PID,NAME`，回退 `ps` 与精确 `pidof`）
+pub fn fetch_matching_pids(adb_path: &PathBuf, serial: &str, pattern: &str) -> HashSet<String> {
+    if let Ok(cap) = adb::run_captured_with_timeout(
+        adb_path,
+        Some(serial),
+        &["shell".into(), "ps".into(), "-A".into(), "-o".into(), "PID,NAME".into()],
+        3,
+    ) {
+        if cap.exit_code == 0 {
+            let pids = parse_ps_pids_matching(&String::from_utf8_lossy(&cap.stdout), pattern);
+            if !pids.is_empty() {
+                return pids;
+            }
+        }
+    }
+
+    if let Ok(cap) = adb::run_captured_with_timeout(
+        adb_path,
+        Some(serial),
+        &["shell".into(), "ps".into()],
+        3,
+    ) {
+        if cap.exit_code == 0 {
+            let pids = parse_ps_pids_matching(&String::from_utf8_lossy(&cap.stdout), pattern);
+            if !pids.is_empty() {
+                return pids;
+            }
+        }
+    }
+
+    if adb::validate_package_name(pattern).is_ok() {
+        if let Ok(cap) = adb::run_captured_with_timeout(
+            adb_path,
+            Some(serial),
+            &["shell".into(), "pidof".into(), pattern.trim().into()],
+            3,
+        ) {
+            if cap.exit_code == 0 {
+                return String::from_utf8_lossy(&cap.stdout)
+                    .split_whitespace()
+                    .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        }
+    }
+
+    HashSet::new()
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {
@@ -1114,5 +1209,62 @@ mod tests {
 
         let banner = format_colored_logcat_line("--------- beginning of main", &[]);
         assert!(banner.starts_with("\x1b[90m"));
+    }
+
+    #[test]
+    fn pause_freezes_viewport_while_buffering_new_entries() {
+        let mut state = AppState {
+            device_label: "dev".into(),
+            serial: "SER".into(),
+            max_buffer: 100,
+            base_seq: 0,
+            next_seq: 0,
+            entries: VecDeque::new(),
+            filtered_seqs: VecDeque::new(),
+            min_level: LogLevel::Verbose,
+            include_text: String::new(),
+            include_regex: None,
+            exclude_text: String::new(),
+            exclude_regex: None,
+            package_name: Arc::new(RwLock::new(None)),
+            tracked_pids: Arc::new(RwLock::new(HashSet::new())),
+            pids_version: Arc::new(AtomicU64::new(0)),
+            seen_pids_version: 0,
+            paused: false,
+            scroll_from_bottom: 0,
+            mode: InputMode::Normal,
+            input_buf: String::new(),
+            status_notice: String::new(),
+            syntax_highlight: true,
+            custom_highlights: Vec::new(),
+        };
+        let pids = HashSet::new();
+        for i in 0..5 {
+            state.push_entry(to_log_entry(&format!("11-27 10:00:0{i}.000  100  100 I Tag: msg {i}")), &None, &pids);
+        }
+        assert_eq!(state.filtered_seqs.len(), 5);
+        assert_eq!(state.scroll_from_bottom, 0);
+
+        state.paused = true;
+        let pinned_end = state.filtered_seqs.len() - state.scroll_from_bottom;
+        for i in 5..8 {
+            state.push_entry(to_log_entry(&format!("11-27 10:00:0{i}.000  100  100 I Tag: msg {i}")), &None, &pids);
+        }
+        assert_eq!(state.filtered_seqs.len(), 8);
+        assert_eq!(state.scroll_from_bottom, 3);
+        assert_eq!(state.filtered_seqs.len() - state.scroll_from_bottom, pinned_end);
+    }
+
+    #[test]
+    fn matches_package_pids_with_regex_from_ps_output() {
+        let ps_o = "  PID NAME\n  939 com.qytech.nav\n 1541 com.cayin.player\n  723 system_server\n";
+        let matched = parse_ps_pids_matching(ps_o, "qytech|cayin");
+        assert!(matched.contains("939"));
+        assert!(matched.contains("1541"));
+        assert!(!matched.contains("723"));
+
+        let ps_full = "USER           PID  PPID     VSZ    RSS WCHAN            ADDR S NAME\nu0_a123       4321   500 1234567  98765 0                   0 S com.example.audio\n";
+        let matched_full = parse_ps_pids_matching(ps_full, r"^com\.example\..*$");
+        assert!(matched_full.contains("4321"));
     }
 }

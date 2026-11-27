@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-x86_64-pc-windows-msvc.zip",
-      "hash": "REPLACE_WITH_WINDOWS_X86_64_SHA256"
+      "hash": "a080ce8defed0e6cd7b4ff580bf0e5fdd049de72827a4ce7cdd3fd55df5fa666"
     }
   },
   "bin": "adbx.exe",

@@ -36,12 +36,18 @@ pub fn fetch_snapshot(
     max_lines: usize,
 ) -> Result<SnapshotResult> {
     let clean_pkg = match package.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(p) => Some(adb::validate_package_name(p)?),
+        Some(p) => {
+            RegexBuilder::new(p)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| anyhow::anyhow!("包名/进程正则无效 '{p}': {e}"))?;
+            Some(p)
+        }
         None => None,
     };
 
     let pids: HashSet<String> = match clean_pkg {
-        Some(pkg) => fetch_pids(adb_path, serial, pkg),
+        Some(pkg) => crate::logcat::fetch_matching_pids(adb_path, serial, pkg),
         None => HashSet::new(),
     };
 
@@ -123,25 +129,6 @@ fn compile_re(pattern: &str) -> Option<regex::Regex> {
         return None;
     }
     RegexBuilder::new(t).case_insensitive(true).build().ok()
-}
-
-fn fetch_pids(adb_path: &PathBuf, serial: &str, pkg: &str) -> HashSet<String> {
-    let Ok(cap) = adb::run_captured_with_timeout(
-        adb_path,
-        Some(serial),
-        &["shell".into(), "pidof".into(), pkg.into()],
-        3,
-    ) else {
-        return HashSet::new();
-    };
-    if cap.exit_code != 0 {
-        return HashSet::new();
-    }
-    String::from_utf8_lossy(&cap.stdout)
-        .split_whitespace()
-        .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
-        .map(|s| s.to_string())
-        .collect()
 }
 
 #[cfg(test)]

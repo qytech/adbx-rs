@@ -35,6 +35,8 @@ toml = "0.8"
 which = "6"
 
 [profile.release]
-lto = "thin"
+opt-level = "z"
+lto = true
 codegen-units = 1
+panic = "abort"
 strip = "symbols"
