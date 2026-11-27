@@ -103,6 +103,7 @@ jobs:
           Section: utils
           Priority: optional
           Architecture: ${{ matrix.deb_arch }}
+          Recommends: adb
           Maintainer: ${GITHUB_REPOSITORY_OWNER}
           Description: Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP
           EOF
@@ -122,6 +123,8 @@ jobs:
     name: Publish GitHub Release & Manifests
     needs: build
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
     steps:
       - name: Checkout
@@ -133,7 +136,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate SHA256SUMS.txt, Formula, Scoop & PKGBUILD
+      - name: Generate SHA256SUMS.txt & Package Manifests
         shell: bash
         run: |
           set -euo pipefail
@@ -148,6 +151,7 @@ jobs:
           SHA_LINUX_X64=$(awk '{print $1}' "artifacts/adbx-${TAG}-x86_64-unknown-linux-musl.tar.gz.sha256")
           SHA_LINUX_ARM=$(awk '{print $1}' "artifacts/adbx-${TAG}-aarch64-unknown-linux-gnu.tar.gz.sha256")
           SHA_WIN=$(awk '{print $1}' "artifacts/adbx-${TAG}-x86_64-pc-windows-msvc.zip.sha256")
+          SHA_WIN_UPPER=$(printf '%s' "${SHA_WIN}" | tr '[:lower:]' '[:upper:]')
 
           cat > artifacts/adbx.rb <<'RUBY'
           class Adbx < Formula
@@ -182,6 +186,11 @@ jobs:
 
             def caveats
               <<~EOS
+                If `adb` is not already installed:
+                  brew install --cask android-platform-tools
+                Or let adbx download official platform-tools automatically:
+                  adbx setup-adb
+
                 Enable dynamic shell completion (including remote device paths):
                   Zsh:  source <(COMPLETE=zsh adbx)
                   Bash: source <(COMPLETE=bash adbx)
@@ -209,6 +218,7 @@ jobs:
               }
             },
             "bin": "adbx.exe",
+            "depends": "adb",
             "checkver": "github",
             "autoupdate": {
               "architecture": {
@@ -229,6 +239,7 @@ jobs:
           arch=('x86_64' 'aarch64')
           url="https://github.com/${REPO}"
           license=('MIT')
+          depends=('android-tools')
           provides=('adbx')
           conflicts=('adbx')
           source_x86_64=("https://github.com/${REPO}/releases/download/${TAG}/adbx-${TAG}-x86_64-unknown-linux-musl.tar.gz")
@@ -242,6 +253,101 @@ jobs:
           EOF
           sed -i 's/^          //' artifacts/PKGBUILD
 
+          cat > artifacts/adbx.nuspec <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+            <metadata>
+              <id>adbx</id>
+              <version>${VER}</version>
+              <title>adbx</title>
+              <authors>${GITHUB_REPOSITORY_OWNER}</authors>
+              <owners>${GITHUB_REPOSITORY_OWNER}</owners>
+              <projectUrl>https://github.com/${REPO}</projectUrl>
+              <packageSourceUrl>https://github.com/${REPO}/tree/main/packaging/chocolatey</packageSourceUrl>
+              <licenseUrl>https://github.com/${REPO}/blob/main/LICENSE</licenseUrl>
+              <requireLicenseAcceptance>false</requireLicenseAcceptance>
+              <tags>adb android cli logcat mcp developer-tools</tags>
+              <summary>Enhanced cross-platform ADB with session locking, broadcast, TUI logcat &amp; MCP</summary>
+              <description>adbx is a cross-platform Rust enhancement for ADB with per-terminal device locking, parallel multi-device broadcast, enhanced interactive shell with hints and completion, colorized logcat and TUI viewer, smart reboot restore, and an MCP stdio server.</description>
+              <dependencies>
+                <dependency id="adb" />
+              </dependencies>
+            </metadata>
+            <files>
+              <file src="tools\**" target="tools" />
+            </files>
+          </package>
+          EOF
+          sed -i 's/^          //' artifacts/adbx.nuspec
+
+          cat > artifacts/chocolateyinstall.ps1 <<'PS1'
+          $ErrorActionPreference = 'Stop'
+
+          $toolsDir = "$(Split-Path -Parent $MyInvocation.MyCommand.Definition)"
+
+          $packageArgs = @{
+            packageName    = $env:ChocolateyPackageName
+            unzipLocation  = $toolsDir
+            url64bit       = 'https://github.com/__REPO__/releases/download/__TAG__/adbx-__TAG__-x86_64-pc-windows-msvc.zip'
+            checksum64     = '__SHA_WIN__'
+            checksumType64 = 'sha256'
+          }
+
+          Install-ChocolateyZipPackage @packageArgs
+          PS1
+          sed -i 's/^          //' artifacts/chocolateyinstall.ps1
+          sed -i "s|__REPO__|${REPO}|g; s|__TAG__|${TAG}|g; s|__SHA_WIN__|${SHA_WIN}|g" artifacts/chocolateyinstall.ps1
+
+          cat > artifacts/Jax-Lifu.adbx.yaml <<EOF
+          PackageIdentifier: Jax-Lifu.adbx
+          PackageVersion: ${VER}
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          EOF
+          sed -i 's/^          //' artifacts/Jax-Lifu.adbx.yaml
+
+          cat > artifacts/Jax-Lifu.adbx.installer.yaml <<EOF
+          PackageIdentifier: Jax-Lifu.adbx
+          PackageVersion: ${VER}
+          InstallerType: zip
+          NestedInstallerType: portable
+          NestedInstallerFiles:
+            - RelativeFilePath: adbx.exe
+              PortableCommandAlias: adbx
+          Installers:
+            - Architecture: x64
+              InstallerUrl: https://github.com/${REPO}/releases/download/${TAG}/adbx-${TAG}-x86_64-pc-windows-msvc.zip
+              InstallerSha256: ${SHA_WIN_UPPER}
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          EOF
+          sed -i 's/^          //' artifacts/Jax-Lifu.adbx.installer.yaml
+
+          cat > artifacts/Jax-Lifu.adbx.locale.en-US.yaml <<EOF
+          PackageIdentifier: Jax-Lifu.adbx
+          PackageVersion: ${VER}
+          PackageLocale: en-US
+          Publisher: ${GITHUB_REPOSITORY_OWNER}
+          PublisherUrl: https://github.com/${GITHUB_REPOSITORY_OWNER}
+          PublisherSupportUrl: https://github.com/${REPO}/issues
+          PackageName: adbx
+          PackageUrl: https://github.com/${REPO}
+          License: MIT
+          LicenseUrl: https://github.com/${REPO}/blob/main/LICENSE
+          ShortDescription: Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP
+          Moniker: adbx
+          Tags:
+            - adb
+            - android
+            - cli
+            - logcat
+            - mcp
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          EOF
+          sed -i 's/^          //' artifacts/Jax-Lifu.adbx.locale.en-US.yaml
+
       - name: Upload GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -254,3 +360,27 @@ jobs:
             artifacts/adbx.rb
             artifacts/adbx.json
             artifacts/PKGBUILD
+            artifacts/adbx.nuspec
+            artifacts/chocolateyinstall.ps1
+            artifacts/Jax-Lifu.adbx.yaml
+            artifacts/Jax-Lifu.adbx.installer.yaml
+            artifacts/Jax-Lifu.adbx.locale.en-US.yaml
+
+      - name: Sync Formula to Jax-Lifu/homebrew-tap
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAP_DIR=$(mktemp -d)
+          trap 'rm -rf "${TAP_DIR}"' EXIT
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-tap.git" "${TAP_DIR}"
+          mkdir -p "${TAP_DIR}/Formula"
+          cp artifacts/adbx.rb "${TAP_DIR}/Formula/adbx.rb"
+          cd "${TAP_DIR}"
+          if ! git diff --quiet -- Formula/adbx.rb; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Formula/adbx.rb
+            git commit -m "adbx ${GITHUB_REF_NAME}"
+            git push origin main
+          fi

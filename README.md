@@ -26,14 +26,13 @@
 
 ### macOS / Linux
 
-- **Homebrew**（macOS Apple Silicon / Intel & Linux x86_64 / arm64）：
+- **Homebrew**（一行直接安装，支持 macOS Apple Silicon / Intel & Linux x86_64 / arm64）：
   ```bash
-  brew tap Jax-Lifu/adbx-rs https://github.com/Jax-Lifu/adbx-rs
-  brew install adbx
+  brew install Jax-Lifu/tap/adbx
   ```
 - **Debian / Ubuntu**（从 [GitHub Releases](https://github.com/Jax-Lifu/adbx-rs/releases) 下载 `.deb`，支持 `amd64` 与 `arm64`）：
   ```bash
-  sudo apt install ./adbx_0.0.1_amd64.deb   # 或 adbx_0.0.1_arm64.deb
+  sudo apt install ./adbx_0.0.2_amd64.deb   # 或 adbx_0.0.2_arm64.deb
   ```
 - **Arch Linux**（使用 [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD) 或 Release 附带的 `PKGBUILD`）：
   ```bash
@@ -46,10 +45,19 @@
 
 ### Windows
 
-- **Scoop**（仓库自带 [bucket/adbx.json](bucket/adbx.json)）：
+- **Winget**（推荐，官方提交后支持直接安装；清单位于 [packaging/winget/](packaging/winget/)）：
   ```powershell
-  scoop bucket add adbx https://github.com/Jax-Lifu/adbx-rs
-  scoop install adbx/adbx
+  winget install Jax-Lifu.adbx
+  ```
+- **Chocolatey**（自动安装 `adb` 依赖；包定义位于 [packaging/chocolatey/](packaging/chocolatey/)）：
+  ```powershell
+  choco install adbx
+  ```
+- **Scoop**（一行直接安装，仓库自带 [bucket/adbx.json](bucket/adbx.json)）：
+  ```powershell
+  scoop install https://raw.githubusercontent.com/Jax-Lifu/adbx-rs/main/bucket/adbx.json
+  # 如需通过 bucket 追踪更新，也可使用:
+  # scoop bucket add adbx https://github.com/Jax-Lifu/adbx-rs && scoop install adbx/adbx
   ```
 - **PowerShell 一键安装**（自动校验 SHA256、解压至 `%LOCALAPPDATA%\adbx\bin` 并加入用户 `PATH`）：
   ```powershell
@@ -59,12 +67,32 @@
 ### Cargo / Rust
 
 ```bash
-# 从 GitHub Release 直接下载预编译二进制
+# 通过 crates.io 编译安装（或使用 cargo-binstall 直接拉取预编译二进制）
+cargo install adbx
 cargo binstall adbx
 
 # 或从本地源码安装
 cargo install --path .
 ```
+
+### 关于 `adb` 依赖（开箱即用）
+
+- 通过 **Chocolatey**（Windows）、**Scoop**（Windows）、**AUR**（Arch Linux）或 **`.deb`** 安装时，会自动关联/推荐安装系统 `adb`。
+- 若通过一键脚本、Winget、Homebrew、Cargo 或源码安装且本机尚未装 `adb`，首次在交互终端运行 `adbx` 时会提示一键自动下载安装 Google 官方 Android Platform-Tools，也可随时手动执行：
+  ```bash
+  adbx setup-adb
+  ```
+
+### 在线自升级
+
+一键安装或源码编译的用户可直接检查并升级到最新 Release（自动校验 SHA256）：
+
+```bash
+adbx update --check     # 仅检查新版本
+adbx update             # 或 adbx upgrade，自动下载并更新
+```
+
+*(若通过 Homebrew / Winget / Chocolatey / Scoop / apt / pacman 安装，建议优先使用对应包管理器升级，如 `brew upgrade adbx` / `winget upgrade Jax-Lifu.adbx` / `choco upgrade adbx` / `scoop update adbx`。)*
 
 ---
 
@@ -182,7 +210,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-推送版本标签（例如 `git tag -a v0.0.1 -m "Release v0.0.1" && git push origin v0.0.1`）后，[.github/workflows/release.yml](.github/workflows/release.yml) 会自动构建 macOS（arm64/x86_64）、Linux（musl x86_64/arm64 + `.deb`）、Windows（x86_64 `.zip`）归档，生成 `SHA256SUMS.txt`、Homebrew `adbx.rb`、Scoop `adbx.json` 和 Arch `PKGBUILD` 并发布至 GitHub Releases。
+推送版本标签（例如 `git tag -a v0.0.2 -m "Release v0.0.2" && git push origin v0.0.2`）后，[.github/workflows/release.yml](.github/workflows/release.yml) 会自动构建 macOS（arm64/x86_64）、Linux（musl x86_64/arm64 + `.deb`）、Windows（x86_64 `.zip`）归档，生成 `SHA256SUMS.txt`、Homebrew `adbx.rb`、Scoop `adbx.json`、Arch `PKGBUILD`、Chocolatey 与 Winget 清单并发布至 GitHub Releases。
 
 ---
 

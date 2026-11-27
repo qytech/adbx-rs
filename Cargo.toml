@@ -1,10 +1,11 @@
 [package]
 name = "adbx"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 license = "MIT"
 description = "Enhanced cross-platform ADB (macOS & Windows): session locking, device groups, parallel broadcast with stream/group timeouts, auto-reconnecting Ratatui Logcat, Wi-Fi & port manager, install+, and hardened MCP server with full UI automation."
 repository = "https://github.com/Jax-Lifu/adbx-rs"
+readme = "README.md"
 keywords = ["adb", "android", "cli", "logcat", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 

@@ -30,7 +30,11 @@ case "$OS" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
-  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  REDIRECT_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
+  VERSION="$(printf '%s' "$REDIRECT_URL" | sed -n 's|.*/releases/tag/\([^/?#]*\).*|\1|p')"
+  if [ -z "$VERSION" ]; then
+    VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  fi
   if [ -z "$VERSION" ]; then
     echo "Failed to resolve latest release tag for ${REPO}" >&2
     exit 1
@@ -76,4 +80,7 @@ case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
   *) echo "Add to PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
+if ! command -v adb >/dev/null 2>&1; then
+  echo "Note: 'adb' was not found in PATH. Run 'adbx setup-adb' to auto-download official Android Platform-Tools."
+fi
 echo "Enable completion: source <(COMPLETE=zsh adbx)  # or COMPLETE=bash"

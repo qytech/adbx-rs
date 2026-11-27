@@ -5,8 +5,15 @@ $Version = if ($env:ADBX_VERSION) { $env:ADBX_VERSION } else { "latest" }
 $InstallDir = if ($env:ADBX_INSTALL_DIR) { $env:ADBX_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "adbx\bin" }
 
 if ($Version -eq "latest") {
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
-    $Version = $release.tag_name
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$Repo/releases/latest"
+    $finalUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
+    if (-not $finalUrl) { $finalUrl = $resp.BaseResponse.RequestMessage.RequestUri.AbsoluteUri }
+    if ($finalUrl -match '/releases/tag/([^/?#]+)') {
+        $Version = $Matches[1]
+    } else {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
+        $Version = $release.tag_name
+    }
 }
 
 $Archive = "adbx-$Version-x86_64-pc-windows-msvc.zip"
@@ -46,6 +53,9 @@ try {
     }
 
     Write-Host "Installed adbx.exe to $(Join-Path $InstallDir 'adbx.exe')"
+    if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
+        Write-Host "Note: 'adb' was not found in PATH. Run 'adbx setup-adb' to auto-download official Android Platform-Tools."
+    }
     Write-Host 'Enable PowerShell completion in $PROFILE:'
     Write-Host '  $env:COMPLETE = "powershell"; adbx | Out-String | Invoke-Expression; Remove-Item Env:\COMPLETE'
 } finally {

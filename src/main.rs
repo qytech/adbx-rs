@@ -15,6 +15,7 @@ mod repl;
 mod selector;
 mod session;
 mod store;
+mod update;
 mod watch;
 mod wifi;
 
@@ -185,6 +186,25 @@ enum Commands {
     Quick {
         action: String,
     },
+    /// 自动下载并安装 Google 官方 Android Platform-Tools（无需手动配置 adb）
+    SetupAdb {
+        /// 强制重新下载覆盖
+        #[arg(long)]
+        force: bool,
+    },
+    /// 检查并自动升级 adbx 到最新 GitHub Release 版本（校验 SHA256）
+    #[command(visible_alias = "upgrade")]
+    Update {
+        /// 仅检查是否有新版本，不执行下载替换
+        #[arg(long)]
+        check: bool,
+        /// 指定要安装的版本号（如 v0.0.2）
+        #[arg(long)]
+        version: Option<String>,
+        /// 强制覆盖当前版本（包括同版本或包管理器目录）
+        #[arg(long)]
+        force: bool,
+    },
     /// 生成静态 Shell 补全脚本
     Completions {
         #[arg(value_enum)]
@@ -339,7 +359,7 @@ fn run() -> Result<u8> {
 
     // 原生逃生舱：`adbx -- <任意原生参数>` 跳过全部增强逻辑，100% 原样转发给本机 adb
     if raw_args.len() >= 2 && raw_args[1] == "--" {
-        let adb_path = adb::find_adb_binary()?;
+        let adb_path = adb::find_or_prompt_adb()?;
         return adb::run_passthrough(&adb_path, None, &raw_args[2..]);
     }
 
@@ -350,7 +370,7 @@ fn run() -> Result<u8> {
             "-a" | "-s" | "-d" | "-e" | "-t" | "-H" | "-P" | "-L" | "--one-device"
         )
     {
-        let adb_path = adb::find_adb_binary()?;
+        let adb_path = adb::find_or_prompt_adb()?;
         return adb::run_passthrough(&adb_path, None, &raw_args[1..]);
     }
 
@@ -364,7 +384,7 @@ fn run() -> Result<u8> {
         }
 
         if rest[0] == "repl" {
-            let adb_path = adb::find_adb_binary()?;
+            let adb_path = adb::find_or_prompt_adb()?;
             let cfg_store = store::Store::load()?;
             let resolved_target = if target_spec == "all"
                 || target_spec.contains(',')
@@ -392,7 +412,7 @@ fn run() -> Result<u8> {
                 yes,
             }) = cli.command
             {
-                let adb_path = adb::find_adb_binary()?;
+                let adb_path = adb::find_or_prompt_adb()?;
                 let cfg_store = store::Store::load()?;
                 let session_id = session::current_session_id();
                 let serial = resolve_single_target_serial(&adb_path, &cfg_store, &session_id, Some(target_spec))?;
@@ -406,7 +426,7 @@ fn run() -> Result<u8> {
             synth.extend(rest.iter().cloned());
             let cli = Cli::try_parse_from(synth)?;
             if let Some(Commands::InstallPlus { apk, launch, timeout, .. }) = cli.command {
-                let adb_path = adb::find_adb_binary()?;
+                let adb_path = adb::find_or_prompt_adb()?;
                 let cfg_store = store::Store::load()?;
                 let session_id = session::current_session_id();
                 return run_install_plus(&adb_path, &cfg_store, &session_id, apk, launch, Some(target_spec), timeout);
@@ -419,7 +439,7 @@ fn run() -> Result<u8> {
             || target_spec.contains(',')
             || cfg_store.group_members(&target_spec).is_some()
         {
-            let adb_path = adb::find_adb_binary()?;
+            let adb_path = adb::find_or_prompt_adb()?;
             let opts = broadcast::parse_broadcast_args(&rest)?;
             let cmd_for_hist = opts.adb_args.clone();
             let started = std::time::Instant::now();
@@ -452,7 +472,19 @@ fn run() -> Result<u8> {
     }
 
     let cli = Cli::parse();
-    let adb_path = adb::find_adb_binary()?;
+    if let Some(Commands::SetupAdb { force }) = cli.command {
+        adb::install_managed_platform_tools(force)?;
+        return Ok(0);
+    }
+    if let Some(Commands::Update {
+        check,
+        version,
+        force,
+    }) = cli.command
+    {
+        return update::run_update(check, version, force);
+    }
+    let adb_path = adb::find_or_prompt_adb()?;
     let mut cfg_store = store::Store::load()?;
     let session_id = session::current_session_id();
 
@@ -726,6 +758,7 @@ fn run() -> Result<u8> {
             tail,
             json,
         }) => run_logcat(None, pkg, level, regex, exclude, buffer, tail, json),
+        Some(Commands::SetupAdb { .. }) | Some(Commands::Update { .. }) => Ok(0),
         Some(Commands::Completions { shell }) => {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "adbx", &mut io::stdout());
@@ -774,7 +807,7 @@ fn format_session_target(spec: &str, store: &store::Store) -> String {
 }
 
 fn run_menu(explicit_target: Option<String>) -> Result<u8> {
-    let adb_path = adb::find_adb_binary()?;
+    let adb_path = adb::find_or_prompt_adb()?;
     let cfg_store = store::Store::load()?;
     let session_id = session::current_session_id();
     let serial = resolve_single_target_serial(&adb_path, &cfg_store, &session_id, explicit_target)?;
@@ -792,7 +825,7 @@ fn run_logcat(
     tail: Option<usize>,
     json: bool,
 ) -> Result<u8> {
-    let adb_path = adb::find_adb_binary()?;
+    let adb_path = adb::find_or_prompt_adb()?;
     let cfg_store = store::Store::load()?;
     let session_id = session::current_session_id();
     let target_serial =
@@ -864,7 +897,7 @@ fn run_logcat(
 }
 
 fn exec_with_target(explicit_target: Option<String>, args: Vec<String>) -> Result<u8> {
-    let adb_path = adb::find_adb_binary()?;
+    let adb_path = adb::find_or_prompt_adb()?;
     let cfg_store = store::Store::load()?;
     let session_id = session::current_session_id();
 

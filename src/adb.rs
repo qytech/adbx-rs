@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Once, OnceLock};
@@ -63,7 +65,37 @@ pub fn is_readonly_mcp_shell(cmd: &str) -> bool {
     }
 }
 
-/// 跨平台探测本机 adb / adb.exe 路径
+/// 返回 adbx 托管下载的官方 Android Platform-Tools 中 `adb` 可执行文件路径
+pub fn managed_adb_path() -> Option<PathBuf> {
+    let base = match std::env::var("ADBX_DATA_DIR") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+        _ => dirs::data_local_dir()?.join("adbx"),
+    };
+    let bin = if cfg!(windows) { "adb.exe" } else { "adb" };
+    Some(base.join("platform-tools").join(bin))
+}
+
+/// 返回当前平台对应的 Google 官方 Android Platform-Tools 下载地址
+pub fn platform_tools_url() -> Result<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok("https://dl.google.com/android/repository/platform-tools-latest-darwin.zip")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok("https://dl.google.com/android/repository/platform-tools-latest-linux.zip")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Ok("https://dl.google.com/android/repository/platform-tools-latest-windows.zip")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        bail!("当前操作系统暂不支持自动下载 Android Platform-Tools，请手动安装 adb 并加入 PATH")
+    }
+}
+
+/// 跨平台探测本机 adb / adb.exe 路径（含 adbx 自动托管目录）
 pub fn find_adb_binary() -> Result<PathBuf> {
     if let Ok(path) = which::which("adb") {
         return Ok(path);
@@ -90,13 +122,111 @@ pub fn find_adb_binary() -> Result<PathBuf> {
         candidates.push(local_app_data.join("Android\\Sdk\\platform-tools\\adb.exe"));
     }
 
+    if let Some(managed) = managed_adb_path() {
+        candidates.push(managed);
+    }
+
     for candidate in candidates {
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
 
-    bail!("未找到 adb 可执行文件，请将其加入 PATH 或设置 ANDROID_HOME 环境变量")
+    bail!("未找到 adb 可执行文件，请运行 `adbx setup-adb` 自动下载官方 Platform-Tools，或将其加入 PATH / 设置 ANDROID_HOME")
+}
+
+/// 下载并安装 Google 官方 Android Platform-Tools 到 adbx 本地托管目录
+pub fn install_managed_platform_tools(force: bool) -> Result<PathBuf> {
+    let target_adb = managed_adb_path().context("无法确定 adbx 本地数据目录")?;
+    let install_root = target_adb
+        .parent()
+        .and_then(|p| p.parent())
+        .context("无效的托管 adb 路径")?
+        .to_path_buf();
+
+    if !force && target_adb.is_file() {
+        println!("已检测到托管的 adb: {}", target_adb.display());
+        return Ok(target_adb);
+    }
+
+    std::fs::create_dir_all(&install_root)?;
+    let url = platform_tools_url()?;
+    let zip_path = install_root.join("platform-tools-download.zip");
+    println!("正在从 Google 官方源下载 Android Platform-Tools...");
+    println!("  {url}");
+
+    #[cfg(unix)]
+    {
+        let dl = Command::new("curl")
+            .args(["-fSL", url, "-o"])
+            .arg(&zip_path)
+            .status()
+            .context("执行 curl 下载失败，请确认本机已安装 curl")?;
+        if !dl.success() {
+            let _ = std::fs::remove_file(&zip_path);
+            bail!("下载 Android Platform-Tools 失败");
+        }
+        let ex = Command::new("unzip")
+            .args(["-oq"])
+            .arg(&zip_path)
+            .arg("-d")
+            .arg(&install_root)
+            .status()
+            .context("执行 unzip 解压失败，请确认本机已安装 unzip")?;
+        let _ = std::fs::remove_file(&zip_path);
+        if !ex.success() {
+            bail!("解压 Android Platform-Tools 失败");
+        }
+        if target_adb.is_file() {
+            let mut perms = std::fs::metadata(&target_adb)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&target_adb, perms)?;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let ps_cmd = format!(
+            "Invoke-WebRequest -Uri '{}' -OutFile '{}'; Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+            url,
+            zip_path.display().to_string().replace('\'', "''"),
+            zip_path.display().to_string().replace('\'', "''"),
+            install_root.display().to_string().replace('\'', "''"),
+        );
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .status()
+            .context("调用 PowerShell 下载并解压 Platform-Tools 失败")?;
+        let _ = std::fs::remove_file(&zip_path);
+        if !status.success() {
+            bail!("下载或解压 Android Platform-Tools 失败");
+        }
+    }
+
+    if !target_adb.is_file() {
+        bail!("未在解压目录中找到 {}", target_adb.display());
+    }
+    println!("已安装官方 adb 到: {}", target_adb.display());
+    Ok(target_adb)
+}
+
+/// 查找 adb，若交互终端下缺失则提示一键自动下载安装官方 Platform-Tools
+pub fn find_or_prompt_adb() -> Result<PathBuf> {
+    match find_adb_binary() {
+        Ok(path) => Ok(path),
+        Err(err) => {
+            if crate::selector::is_interactive_tty() {
+                let confirm = dialoguer::Confirm::new()
+                    .with_prompt("未检测到本机 adb，是否立即自动下载安装官方 Android Platform-Tools？")
+                    .default(true)
+                    .interact()?;
+                if confirm {
+                    return install_managed_platform_tools(false);
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 /// 解析 `adb devices -l` 输出
@@ -324,5 +454,20 @@ mod tests {
         assert!(is_dangerous_command(&s(&["reboot"])));
         assert!(is_dangerous_command(&s(&["shell", "rm", "-rf", "/sdcard/x"])));
         assert!(!is_dangerous_command(&s(&["shell", "ls", "/sdcard"])));
+    }
+
+    #[test]
+    fn platform_tools_url_and_managed_path_are_valid() {
+        let url = platform_tools_url().unwrap();
+        assert!(url.starts_with("https://dl.google.com/android/repository/platform-tools-latest-"));
+        assert!(url.ends_with(".zip"));
+
+        let path = managed_adb_path().unwrap();
+        let expected_name = if cfg!(windows) { "adb.exe" } else { "adb" };
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some(expected_name));
+        assert_eq!(
+            path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+            Some("platform-tools")
+        );
     }
 }

@@ -5,6 +5,7 @@ pkgdesc="Enhanced cross-platform ADB with session locking, broadcast, TUI logcat
 arch=('x86_64' 'aarch64')
 url="https://github.com/Jax-Lifu/adbx-rs"
 license=('MIT')
+depends=('android-tools')
 provides=('adbx')
 conflicts=('adbx')
 source_x86_64=("https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.1/adbx-v0.0.1-x86_64-unknown-linux-musl.tar.gz")

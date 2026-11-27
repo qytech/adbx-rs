@@ -30,6 +30,11 @@ class Adbx < Formula
 
   def caveats
     <<~EOS
+      If `adb` is not already installed:
+        brew install --cask android-platform-tools
+      Or let adbx download official platform-tools automatically:
+        adbx setup-adb
+
       Enable dynamic shell completion (including remote device paths):
         Zsh:  source <(COMPLETE=zsh adbx)
         Bash: source <(COMPLETE=bash adbx)

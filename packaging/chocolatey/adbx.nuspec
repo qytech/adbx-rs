@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>adbx</id>
+    <version>0.0.1</version>
+    <title>adbx</title>
+    <authors>Jax-Lifu</authors>
+    <owners>Jax-Lifu</owners>
+    <projectUrl>https://github.com/Jax-Lifu/adbx-rs</projectUrl>
+    <packageSourceUrl>https://github.com/Jax-Lifu/adbx-rs/tree/main/packaging/chocolatey</packageSourceUrl>
+    <licenseUrl>https://github.com/Jax-Lifu/adbx-rs/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>adb android cli logcat mcp developer-tools</tags>
+    <summary>Enhanced cross-platform ADB with session locking, broadcast, TUI logcat &amp; MCP</summary>
+    <description>adbx is a cross-platform Rust enhancement for ADB with per-terminal device locking, parallel multi-device broadcast, enhanced interactive shell with hints and completion, colorized logcat and TUI viewer, smart reboot restore, and an MCP stdio server.</description>
+    <dependencies>
+      <dependency id="adb" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

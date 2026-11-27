@@ -29,7 +29,7 @@ sh -n scripts/install.sh
 - [src/logcat.rs](src/logcat.rs), [src/logcat_snapshot.rs](src/logcat_snapshot.rs), [src/highlight.rs](src/highlight.rs): Shared `threadtime` parser (`parse_threadtime_raw`), Ratatui auto-reconnecting Logcat TUI, real-time ANSI colorized `adbx logcat` streaming, non-interactive `adbx log --tail` snapshots, and VS Code-style + `[log_highlights]` semantic coloring.
 - [src/watch.rs](src/watch.rs): Ratatui multi-device monitor connecting to `127.0.0.1:${ANDROID_ADB_SERVER_PORT:-5037}` (`host:track-devices`).
 - [src/reboot.rs](src/reboot.rs): Smart `adbx reboot` (`rr`) restoring `root`/`remount` state and launching enhanced shell.
-- [src/wifi.rs](src/wifi.rs), [src/port.rs](src/port.rs), [src/history.rs](src/history.rs), [src/palette.rs](src/palette.rs), [src/config_cmd.rs](src/config_cmd.rs): Wi-Fi ADB, port presets, JSONL history + `.sh`/`.json` export, fuzzy command palette, and config lifecycle (`parse_editor_command`).
+- [src/wifi.rs](src/wifi.rs), [src/port.rs](src/port.rs), [src/history.rs](src/history.rs), [src/palette.rs](src/palette.rs), [src/config_cmd.rs](src/config_cmd.rs), [src/update.rs](src/update.rs): Wi-Fi ADB, port presets, JSONL history + `.sh`/`.json` export, fuzzy command palette, config lifecycle (`parse_editor_command`), and self-update (`adbx update` / `upgrade`).
 - [src/mcp.rs](src/mcp.rs): Native stdio JSON-RPC 2.0 MCP server (`adbx mcp`, safe read-only allowlist by default, `--allow-destructive` opt-in).
 
 ## Critical Invariants & Conventions
@@ -49,6 +49,6 @@ sh -n scripts/install.sh
 
 ## Packaging & Release
 
-- CI workflows: [.github/workflows/ci.yml](.github/workflows/ci.yml) (macOS, Ubuntu, Windows) and [.github/workflows/release.yml](.github/workflows/release.yml) (5-target archives, `.deb` packages, `SHA256SUMS.txt`, Homebrew `adbx.rb`, Scoop `adbx.json`, Arch `PKGBUILD`).
-- Distribution templates & installers: [Formula/adbx.rb](Formula/adbx.rb), [bucket/adbx.json](bucket/adbx.json), [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD), [scripts/install.sh](scripts/install.sh), [scripts/install.ps1](scripts/install.ps1).
+- CI workflows: [.github/workflows/ci.yml](.github/workflows/ci.yml) (macOS, Ubuntu, Windows) and [.github/workflows/release.yml](.github/workflows/release.yml) (5-target archives, `.deb` packages, `SHA256SUMS.txt`, Homebrew `adbx.rb`, Scoop `adbx.json`, Arch `PKGBUILD`, Chocolatey `adbx.nuspec`/`chocolateyinstall.ps1`, Winget YAML manifests).
+- Distribution templates & installers: [Formula/adbx.rb](Formula/adbx.rb), [bucket/adbx.json](bucket/adbx.json), [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD), [packaging/chocolatey/](packaging/chocolatey/adbx.nuspec), [packaging/winget/](packaging/winget/Jax-Lifu.adbx.yaml), [scripts/install.sh](scripts/install.sh), [scripts/install.ps1](scripts/install.ps1).
 - When cutting a release: bump `version` in `Cargo.toml`, verify `clippy` + `test`, push `git tag -a vX.Y.Z -m "Release vX.Y.Z"` + `git push origin vX.Y.Z`, and sync the generated SHA256 manifests from the GitHub Release back into the repo.
