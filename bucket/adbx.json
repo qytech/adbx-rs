@@ -1,12 +1,12 @@
 {
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP",
   "homepage": "https://github.com/Jax-Lifu/adbx-rs",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.2/adbx-v0.0.2-x86_64-pc-windows-msvc.zip",
-      "hash": "25b6b914d402f82f9a46511b358b2d68136a5289374d0b9342a55b0ab50d0faf"
+      "url": "https://github.com/Jax-Lifu/adbx-rs/releases/download/v0.0.3/adbx-v0.0.3-x86_64-pc-windows-msvc.zip",
+      "hash": "d6626904a4378aafcbe80c0066399c22dc28d6e36a8b65b3bec361ee97adeab0"
     }
   },
   "bin": "adbx.exe",
