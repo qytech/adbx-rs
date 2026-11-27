@@ -1,0 +1,256 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            bin: adbx
+            deb_arch: ""
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: tar.gz
+            bin: adbx
+            deb_arch: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: tar.gz
+            bin: adbx
+            deb_arch: amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            ext: tar.gz
+            bin: adbx
+            deb_arch: arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            bin: adbx.exe
+            deb_arch: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux cross/musl build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            sudo apt-get install -y musl-tools
+          elif [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package archive, deb & checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          ARCHIVE="adbx-${TAG}-${{ matrix.target }}.${{ matrix.ext }}"
+          mkdir -p dist/pkg
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/pkg/"
+          cp README.md "dist/pkg/"
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            (cd dist/pkg && 7z a -tzip "../${ARCHIVE}" .)
+            (cd dist && sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256")
+          else
+            tar -C dist/pkg -czf "dist/${ARCHIVE}" "${{ matrix.bin }}" README.md
+            if command -v shasum >/dev/null 2>&1; then
+              (cd dist && shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256")
+            else
+              (cd dist && sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256")
+            fi
+          fi
+          rm -rf dist/pkg
+
+          if [ -n "${{ matrix.deb_arch }}" ]; then
+            DEB_DIR="dist/deb_root"
+            DEB_NAME="adbx_${VER}_${{ matrix.deb_arch }}.deb"
+            mkdir -p "${DEB_DIR}/DEBIAN" "${DEB_DIR}/usr/bin"
+            install -m 755 "target/${{ matrix.target }}/release/${{ matrix.bin }}" "${DEB_DIR}/usr/bin/adbx"
+            cat > "${DEB_DIR}/DEBIAN/control" <<EOF
+          Package: adbx
+          Version: ${VER}
+          Section: utils
+          Priority: optional
+          Architecture: ${{ matrix.deb_arch }}
+          Maintainer: ${GITHUB_REPOSITORY_OWNER}
+          Description: Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP
+          EOF
+            sed -i 's/^          //' "${DEB_DIR}/DEBIAN/control"
+            dpkg-deb --build "${DEB_DIR}" "dist/${DEB_NAME}"
+            (cd dist && sha256sum "${DEB_NAME}" > "${DEB_NAME}.sha256")
+            rm -rf "${DEB_DIR}"
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release & Manifests
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt, Formula, Scoop & PKGBUILD
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          cat artifacts/*.sha256 | sort > artifacts/SHA256SUMS.txt
+
+          SHA_MAC_ARM=$(awk '{print $1}' "artifacts/adbx-${TAG}-aarch64-apple-darwin.tar.gz.sha256")
+          SHA_MAC_X64=$(awk '{print $1}' "artifacts/adbx-${TAG}-x86_64-apple-darwin.tar.gz.sha256")
+          SHA_LINUX_X64=$(awk '{print $1}' "artifacts/adbx-${TAG}-x86_64-unknown-linux-musl.tar.gz.sha256")
+          SHA_LINUX_ARM=$(awk '{print $1}' "artifacts/adbx-${TAG}-aarch64-unknown-linux-gnu.tar.gz.sha256")
+          SHA_WIN=$(awk '{print $1}' "artifacts/adbx-${TAG}-x86_64-pc-windows-msvc.zip.sha256")
+
+          cat > artifacts/adbx.rb <<'RUBY'
+          class Adbx < Formula
+            desc "Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP"
+            homepage "https://github.com/__REPO__"
+            version "__VER__"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/__REPO__/releases/download/__TAG__/adbx-__TAG__-aarch64-apple-darwin.tar.gz"
+                sha256 "__SHA_MAC_ARM__"
+              else
+                url "https://github.com/__REPO__/releases/download/__TAG__/adbx-__TAG__-x86_64-apple-darwin.tar.gz"
+                sha256 "__SHA_MAC_X64__"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/__REPO__/releases/download/__TAG__/adbx-__TAG__-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "__SHA_LINUX_ARM__"
+              else
+                url "https://github.com/__REPO__/releases/download/__TAG__/adbx-__TAG__-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "__SHA_LINUX_X64__"
+              end
+            end
+
+            def install
+              bin.install "adbx"
+            end
+
+            def caveats
+              <<~EOS
+                Enable dynamic shell completion (including remote device paths):
+                  Zsh:  source <(COMPLETE=zsh adbx)
+                  Bash: source <(COMPLETE=bash adbx)
+              EOS
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/adbx --version")
+            end
+          end
+          RUBY
+          sed -i 's/^          //' artifacts/adbx.rb
+          sed -i "s|__REPO__|${REPO}|g; s|__TAG__|${TAG}|g; s|__VER__|${VER}|g; s|__SHA_MAC_ARM__|${SHA_MAC_ARM}|g; s|__SHA_MAC_X64__|${SHA_MAC_X64}|g; s|__SHA_LINUX_ARM__|${SHA_LINUX_ARM}|g; s|__SHA_LINUX_X64__|${SHA_LINUX_X64}|g" artifacts/adbx.rb
+
+          cat > artifacts/adbx.json <<EOF
+          {
+            "version": "${VER}",
+            "description": "Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP",
+            "homepage": "https://github.com/${REPO}",
+            "license": "MIT",
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/adbx-${TAG}-x86_64-pc-windows-msvc.zip",
+                "hash": "${SHA_WIN}"
+              }
+            },
+            "bin": "adbx.exe",
+            "checkver": "github",
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/${REPO}/releases/download/v\$version/adbx-v\$version-x86_64-pc-windows-msvc.zip"
+                }
+              }
+            }
+          }
+          EOF
+          sed -i 's/^          //' artifacts/adbx.json
+
+          cat > artifacts/PKGBUILD <<EOF
+          pkgname=adbx-bin
+          pkgver=${VER}
+          pkgrel=1
+          pkgdesc="Enhanced cross-platform ADB with session locking, broadcast, TUI logcat & MCP"
+          arch=('x86_64' 'aarch64')
+          url="https://github.com/${REPO}"
+          license=('MIT')
+          provides=('adbx')
+          conflicts=('adbx')
+          source_x86_64=("https://github.com/${REPO}/releases/download/${TAG}/adbx-${TAG}-x86_64-unknown-linux-musl.tar.gz")
+          source_aarch64=("https://github.com/${REPO}/releases/download/${TAG}/adbx-${TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          sha256sums_x86_64=('${SHA_LINUX_X64}')
+          sha256sums_aarch64=('${SHA_LINUX_ARM}')
+
+          package() {
+            install -Dm755 "\${srcdir}/adbx" "\${pkgdir}/usr/bin/adbx"
+          }
+          EOF
+          sed -i 's/^          //' artifacts/PKGBUILD
+
+      - name: Upload GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.deb
+            artifacts/SHA256SUMS.txt
+            artifacts/adbx.rb
+            artifacts/adbx.json
+            artifacts/PKGBUILD

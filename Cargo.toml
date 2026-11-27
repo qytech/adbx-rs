@@ -1,0 +1,40 @@
+[package]
+name = "adbx"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Enhanced cross-platform ADB (macOS & Windows): session locking, device groups, parallel broadcast with stream/group timeouts, auto-reconnecting Ratatui Logcat, Wi-Fi & port manager, install+, and hardened MCP server with full UI automation."
+repository = "https://github.com/Jax-Lifu/adbx-rs"
+keywords = ["adb", "android", "cli", "logcat", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
+crossterm = "0.28"
+ctrlc = "3"
+dialoguer = { version = "0.12", features = ["fuzzy-select"] }
+dirs = "5"
+ratatui = "0.29"
+regex = "1"
+rustyline = "15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+which = "6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
