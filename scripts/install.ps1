@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$Repo = if ($env:ADBX_REPO) { $env:ADBX_REPO } else { "Jax-Lifu/adbx-rs" }
+$Repo = if ($env:ADBX_REPO) { $env:ADBX_REPO } else { "qytech/adbx-rs" }
 $Version = if ($env:ADBX_VERSION) { $env:ADBX_VERSION } else { "latest" }
 $InstallDir = if ($env:ADBX_INSTALL_DIR) { $env:ADBX_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "adbx\bin" }
 

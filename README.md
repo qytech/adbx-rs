@@ -1,7 +1,7 @@
 # adbx
 
-[![CI](https://github.com/Jax-Lifu/adbx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Jax-Lifu/adbx-rs/actions/workflows/ci.yml)
-[![Release](https://github.com/Jax-Lifu/adbx-rs/actions/workflows/release.yml/badge.svg)](https://github.com/Jax-Lifu/adbx-rs/actions/workflows/release.yml)
+[![CI](https://github.com/qytech/adbx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/qytech/adbx-rs/actions/workflows/ci.yml)
+[![Release](https://github.com/qytech/adbx-rs/actions/workflows/release.yml/badge.svg)](https://github.com/qytech/adbx-rs/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 面向 **macOS、Linux 与 Windows** 的 Rust 增强型 ADB 工具：解决多机研发中的**串机误操作、批量执行、无提示 Shell、无高亮 Logcat 与 AI Agent 接入**问题，同时保持与原生 `adb` 参数 100% 兼容。
@@ -28,11 +28,11 @@
 
 - **Homebrew**（一行直接安装，支持 macOS Apple Silicon / Intel & Linux x86_64 / arm64）：
   ```bash
-  brew install Jax-Lifu/tap/adbx
+  brew install qytech/tap/adbx
   ```
-- **Debian / Ubuntu**（从 [GitHub Releases](https://github.com/Jax-Lifu/adbx-rs/releases) 下载 `.deb`，支持 `amd64` 与 `arm64`）：
+- **Debian / Ubuntu**（从 [GitHub Releases](https://github.com/qytech/adbx-rs/releases) 下载 `.deb`，支持 `amd64` 与 `arm64`）：
   ```bash
-  sudo apt install ./adbx_0.0.3_amd64.deb   # 或 adbx_0.0.3_arm64.deb
+  sudo apt install ./adbx_0.0.4_amd64.deb   # 或 adbx_0.0.4_arm64.deb
   ```
 - **Arch Linux**（使用 [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD) 或 Release 附带的 `PKGBUILD`）：
   ```bash
@@ -40,28 +40,30 @@
   ```
 - **一键脚本安装**（自动校验 SHA256，支持 macOS arm64/x86_64 与 Linux x86_64（musl）与 arm64（glibc））：
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/Jax-Lifu/adbx-rs/main/scripts/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/qytech/adbx-rs/main/scripts/install.sh | sh
   ```
 
-### Windows
+### Windows x64
 
-- **Winget**（推荐，官方提交后支持直接安装；清单位于 [packaging/winget/](packaging/winget/)）：
+- **PowerShell 一键安装**（从 GitHub Releases 下载，自动校验 SHA256，将 `%LOCALAPPDATA%\adbx\bin` 加入用户 `PATH`）：
   ```powershell
-  winget install Jax-Lifu.adbx
+  irm https://raw.githubusercontent.com/qytech/adbx-rs/main/scripts/install.ps1 | iex
   ```
+  安装后新开 PowerShell，运行 `adbx --version` 验证。也可下载 [v0.0.4 Windows x64 ZIP](https://github.com/qytech/adbx-rs/releases/download/v0.0.4/adbx-v0.0.4-x86_64-pc-windows-msvc.zip)，解压后在该目录运行 `.\adbx.exe --version`。
+- **WinGet 公共源**：[收录申请](https://github.com/microsoft/winget-pkgs/pull/490921) 已提交。可用 `winget search --id qytech.adbx --exact --source winget` 检查收录情况；查到包后运行：
+  ```powershell
+  winget install --id qytech.adbx --exact --source winget
+  ```
+  如果提示找不到包，可直接使用上面的 PowerShell 或 ZIP 安装方式。
 - **Chocolatey**（自动安装 `adb` 依赖；包定义位于 [packaging/chocolatey/](packaging/chocolatey/)）：
   ```powershell
   choco install adbx
   ```
 - **Scoop**（一行直接安装，仓库自带 [bucket/adbx.json](bucket/adbx.json)）：
   ```powershell
-  scoop install https://raw.githubusercontent.com/Jax-Lifu/adbx-rs/main/bucket/adbx.json
+  scoop install https://raw.githubusercontent.com/qytech/adbx-rs/main/bucket/adbx.json
   # 如需通过 bucket 追踪更新，也可使用:
-  # scoop bucket add adbx https://github.com/Jax-Lifu/adbx-rs && scoop install adbx/adbx
-  ```
-- **PowerShell 一键安装**（自动校验 SHA256、解压至 `%LOCALAPPDATA%\adbx\bin` 并加入用户 `PATH`）：
-  ```powershell
-  irm https://raw.githubusercontent.com/Jax-Lifu/adbx-rs/main/scripts/install.ps1 | iex
+  # scoop bucket add adbx https://github.com/qytech/adbx-rs && scoop install adbx/adbx
   ```
 
 ### Cargo / Rust
@@ -94,7 +96,7 @@ adbx update --check     # 仅检查新版本
 adbx update             # 或 adbx upgrade，自动下载并更新
 ```
 
-*(若通过 Homebrew / Winget / Chocolatey / Scoop / apt / pacman 安装，建议优先使用对应包管理器升级，如 `brew upgrade adbx` / `winget upgrade Jax-Lifu.adbx` / `choco upgrade adbx` / `scoop update adbx`。)*
+*(若通过 Homebrew / Winget / Chocolatey / Scoop / apt / pacman 安装，建议优先使用对应包管理器升级，如 `brew upgrade adbx` / `winget upgrade qytech.adbx` / `choco upgrade adbx` / `scoop update adbx`。)*
 
 ### 卸载（手机应用 & 本机 `adbx`）
 
@@ -247,7 +249,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-推送版本标签（例如 `git tag -a v0.0.3 -m "Release v0.0.3" && git push origin v0.0.3`）后，[.github/workflows/release.yml](.github/workflows/release.yml) 会自动构建 macOS（arm64/x86_64）、Linux（musl x86_64/arm64 + `.deb`）、Windows（x86_64 `.zip`）归档，生成 `SHA256SUMS.txt`、Homebrew `adbx.rb`、Scoop `adbx.json`、Arch `PKGBUILD`、Chocolatey 与 Winget 清单并发布至 GitHub Releases。
+推送版本标签（例如 `git tag -a v0.0.4 -m "Release v0.0.4" && git push origin v0.0.4`）后，[.github/workflows/release.yml](.github/workflows/release.yml) 会自动构建 macOS（arm64/x86_64）、Linux（x86_64 musl、arm64 glibc 和两种架构的 `.deb`）、Windows（x86_64 `.zip`）归档，生成 `SHA256SUMS.txt`、Homebrew `adbx.rb`、Scoop `adbx.json`、Arch `PKGBUILD`、Chocolatey 与 Winget 清单并发布至 GitHub Releases。
 
 ---
 

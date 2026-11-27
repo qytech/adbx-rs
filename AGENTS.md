@@ -50,5 +50,5 @@ sh -n scripts/install.sh
 ## Packaging & Release
 
 - CI workflows: [.github/workflows/ci.yml](.github/workflows/ci.yml) (macOS, Ubuntu, Windows) and [.github/workflows/release.yml](.github/workflows/release.yml) (5-target archives, `.deb` packages, `SHA256SUMS.txt`, Homebrew `adbx.rb`, Scoop `adbx.json`, Arch `PKGBUILD`, Chocolatey `adbx.nuspec`/`chocolateyinstall.ps1`, Winget YAML manifests).
-- Distribution templates & installers: [Formula/adbx.rb](Formula/adbx.rb), [bucket/adbx.json](bucket/adbx.json), [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD), [packaging/chocolatey/](packaging/chocolatey/adbx.nuspec), [packaging/winget/](packaging/winget/Jax-Lifu.adbx.yaml), [scripts/install.sh](scripts/install.sh), [scripts/install.ps1](scripts/install.ps1).
+- Distribution templates & installers: [Formula/adbx.rb](Formula/adbx.rb), [bucket/adbx.json](bucket/adbx.json), [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD), [packaging/chocolatey/](packaging/chocolatey/adbx.nuspec), [packaging/winget/](packaging/winget/qytech.adbx.yaml), [scripts/install.sh](scripts/install.sh), [scripts/install.ps1](scripts/install.ps1).
 - When cutting a release: bump `version` in `Cargo.toml`, verify `clippy` + `test`, push `git tag -a vX.Y.Z -m "Release vX.Y.Z"` + `git push origin vX.Y.Z`, and sync the generated SHA256 manifests from the GitHub Release back into the repo.

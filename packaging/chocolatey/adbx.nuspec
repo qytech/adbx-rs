@@ -4,11 +4,11 @@
     <id>adbx</id>
     <version>0.0.3</version>
     <title>adbx</title>
-    <authors>Jax-Lifu</authors>
-    <owners>Jax-Lifu</owners>
-    <projectUrl>https://github.com/Jax-Lifu/adbx-rs</projectUrl>
-    <packageSourceUrl>https://github.com/Jax-Lifu/adbx-rs/tree/main/packaging/chocolatey</packageSourceUrl>
-    <licenseUrl>https://github.com/Jax-Lifu/adbx-rs/blob/main/LICENSE</licenseUrl>
+    <authors>qytech</authors>
+    <owners>qytech</owners>
+    <projectUrl>https://github.com/qytech/adbx-rs</projectUrl>
+    <packageSourceUrl>https://github.com/qytech/adbx-rs/tree/main/packaging/chocolatey</packageSourceUrl>
+    <licenseUrl>https://github.com/qytech/adbx-rs/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>adb android cli logcat mcp developer-tools</tags>
     <summary>Enhanced cross-platform ADB with session locking, broadcast, TUI logcat &amp; MCP</summary>

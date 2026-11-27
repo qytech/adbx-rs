@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_REPO: &str = "Jax-Lifu/adbx-rs";
+const DEFAULT_REPO: &str = "qytech/adbx-rs";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct TempDirGuard(PathBuf);
@@ -402,7 +402,7 @@ fn uninstall_one(item: &DetectedInstall, current_exe: Option<&Path>) -> Result<b
             }
         }
         InstallSource::Winget => {
-            run_pkg_uninstall(Path::new("winget"), &["uninstall", "--id", "Jax-Lifu.adbx"])?
+            run_pkg_uninstall(Path::new("winget"), &["uninstall", "--id", "qytech.adbx"])?
         }
         InstallSource::SystemPkg => {
             println!(
@@ -618,7 +618,7 @@ fn detect_package_manager_hint(exe_path: &Path) -> Option<&'static str> {
         InstallSource::Homebrew => Some("brew upgrade adbx"),
         InstallSource::Scoop => Some("scoop update adbx"),
         InstallSource::Chocolatey => Some("choco upgrade adbx"),
-        InstallSource::Winget => Some("winget upgrade Jax-Lifu.adbx"),
+        InstallSource::Winget => Some("winget upgrade qytech.adbx"),
         InstallSource::SystemPkg => Some("系统包管理器（apt / pacman）升级，或 `adbx update --force`"),
         InstallSource::Cargo | InstallSource::DirectBinary => None,
     }
@@ -977,9 +977,9 @@ mod tests {
         );
         assert_eq!(
             detect_package_manager_hint(Path::new(
-                r"C:\Users\dev\AppData\Local\Microsoft\WinGet\Packages\Jax-Lifu.adbx_Microsoft.Winget.Source_8wekyb3d8bbwe\adbx.exe"
+                r"C:\Users\dev\AppData\Local\Microsoft\WinGet\Packages\qytech.adbx_Microsoft.Winget.Source_8wekyb3d8bbwe\adbx.exe"
             )),
-            Some("winget upgrade Jax-Lifu.adbx")
+            Some("winget upgrade qytech.adbx")
         );
         assert_eq!(
             detect_package_manager_hint(Path::new("/Users/dev/.local/bin/adbx")),
@@ -990,12 +990,12 @@ mod tests {
     #[test]
     fn extracts_tag_from_latest_redirect_url() {
         assert_eq!(
-            extract_tag_from_release_url("https://github.com/Jax-Lifu/adbx-rs/releases/tag/v0.0.1")
+            extract_tag_from_release_url("https://github.com/qytech/adbx-rs/releases/tag/v0.0.1")
                 .as_deref(),
             Some("v0.0.1")
         );
         assert_eq!(
-            extract_tag_from_release_url("https://github.com/Jax-Lifu/adbx-rs/releases"),
+            extract_tag_from_release_url("https://github.com/qytech/adbx-rs/releases"),
             None
         );
     }

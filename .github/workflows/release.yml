@@ -298,17 +298,21 @@ jobs:
           sed -i 's/^          //' artifacts/chocolateyinstall.ps1
           sed -i "s|__REPO__|${REPO}|g; s|__TAG__|${TAG}|g; s|__SHA_WIN__|${SHA_WIN}|g" artifacts/chocolateyinstall.ps1
 
-          cat > artifacts/Jax-Lifu.adbx.yaml <<EOF
-          PackageIdentifier: Jax-Lifu.adbx
+          cat > artifacts/qytech.adbx.yaml <<EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.28.0.schema.json
+
+          PackageIdentifier: qytech.adbx
           PackageVersion: ${VER}
           DefaultLocale: en-US
           ManifestType: version
-          ManifestVersion: 1.6.0
+          ManifestVersion: 1.28.0
           EOF
-          sed -i 's/^          //' artifacts/Jax-Lifu.adbx.yaml
+          sed -i 's/^          //' artifacts/qytech.adbx.yaml
 
-          cat > artifacts/Jax-Lifu.adbx.installer.yaml <<EOF
-          PackageIdentifier: Jax-Lifu.adbx
+          cat > artifacts/qytech.adbx.installer.yaml <<EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
+
+          PackageIdentifier: qytech.adbx
           PackageVersion: ${VER}
           InstallerType: zip
           NestedInstallerType: portable
@@ -320,12 +324,14 @@ jobs:
               InstallerUrl: https://github.com/${REPO}/releases/download/${TAG}/adbx-${TAG}-x86_64-pc-windows-msvc.zip
               InstallerSha256: ${SHA_WIN_UPPER}
           ManifestType: installer
-          ManifestVersion: 1.6.0
+          ManifestVersion: 1.28.0
           EOF
-          sed -i 's/^          //' artifacts/Jax-Lifu.adbx.installer.yaml
+          sed -i 's/^          //' artifacts/qytech.adbx.installer.yaml
 
-          cat > artifacts/Jax-Lifu.adbx.locale.en-US.yaml <<EOF
-          PackageIdentifier: Jax-Lifu.adbx
+          cat > artifacts/qytech.adbx.locale.en-US.yaml <<EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.28.0.schema.json
+
+          PackageIdentifier: qytech.adbx
           PackageVersion: ${VER}
           PackageLocale: en-US
           Publisher: ${GITHUB_REPOSITORY_OWNER}
@@ -344,9 +350,9 @@ jobs:
             - logcat
             - mcp
           ManifestType: defaultLocale
-          ManifestVersion: 1.6.0
+          ManifestVersion: 1.28.0
           EOF
-          sed -i 's/^          //' artifacts/Jax-Lifu.adbx.locale.en-US.yaml
+          sed -i 's/^          //' artifacts/qytech.adbx.locale.en-US.yaml
 
       - name: Upload GitHub Release
         uses: softprops/action-gh-release@v2
@@ -362,11 +368,11 @@ jobs:
             artifacts/PKGBUILD
             artifacts/adbx.nuspec
             artifacts/chocolateyinstall.ps1
-            artifacts/Jax-Lifu.adbx.yaml
-            artifacts/Jax-Lifu.adbx.installer.yaml
-            artifacts/Jax-Lifu.adbx.locale.en-US.yaml
+            artifacts/qytech.adbx.yaml
+            artifacts/qytech.adbx.installer.yaml
+            artifacts/qytech.adbx.locale.en-US.yaml
 
-      - name: Sync Formula to Jax-Lifu/homebrew-tap
+      - name: Sync Formula to qytech/homebrew-tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         shell: bash
         run: |

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${ADBX_REPO:-Jax-Lifu/adbx-rs}"
+REPO="${ADBX_REPO:-qytech/adbx-rs}"
 VERSION="${ADBX_VERSION:-latest}"
 INSTALL_DIR="${ADBX_INSTALL_DIR:-$HOME/.local/bin}"
 
