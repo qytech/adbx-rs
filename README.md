@@ -32,13 +32,13 @@
   ```
 - **Debian / Ubuntu**（从 [GitHub Releases](https://github.com/Jax-Lifu/adbx-rs/releases) 下载 `.deb`，支持 `amd64` 与 `arm64`）：
   ```bash
-  sudo apt install ./adbx_0.0.2_amd64.deb   # 或 adbx_0.0.2_arm64.deb
+  sudo apt install ./adbx_0.0.3_amd64.deb   # 或 adbx_0.0.3_arm64.deb
   ```
 - **Arch Linux**（使用 [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD) 或 Release 附带的 `PKGBUILD`）：
   ```bash
   makepkg -si
   ```
-- **一键脚本安装**（自动校验 SHA256，支持 macOS arm64/x86_64 与 Linux static musl x86_64 / arm64）：
+- **一键脚本安装**（自动校验 SHA256，支持 macOS arm64/x86_64 与 Linux x86_64（musl）与 arm64（glibc））：
   ```bash
   curl -fsSL https://raw.githubusercontent.com/Jax-Lifu/adbx-rs/main/scripts/install.sh | sh
   ```
@@ -83,6 +83,8 @@ cargo install --path .
   adbx setup-adb
   ```
 
+Linux ARM64 用户请从发行版软件源安装原生 `adb`。
+
 ### 在线自升级
 
 一键安装或源码编译的用户可直接检查并升级到最新 Release（自动校验 SHA256）：
@@ -94,6 +96,19 @@ adbx update             # 或 adbx upgrade，自动下载并更新
 
 *(若通过 Homebrew / Winget / Chocolatey / Scoop / apt / pacman 安装，建议优先使用对应包管理器升级，如 `brew upgrade adbx` / `winget upgrade Jax-Lifu.adbx` / `choco upgrade adbx` / `scoop update adbx`。)*
 
+### 卸载（手机应用 & 本机 `adbx`）
+
+```bash
+adbx uninstall                     # 交互式多选设备上的第三方应用并确认卸载
+adbx uninstall com.example.app     # 确认目标设备后卸载指定应用（需交互确认）
+
+adbx uninstall --self --dry-run    # 仅预览本机 adbx 安装位置（如脚本与 Homebrew 多份共存）
+adbx uninstall --self              # 交互式卸载本机 adbx（支持 alias: adbx self-uninstall）
+adbx uninstall --self --purge -y   # 卸载本机 adbx 并清理配置、历史、缓存与托管的 platform-tools
+```
+
+`--purge` 按文件清理 adbx 数据。自定义数据目录中仅清理带有 adbx 安装标记的 `platform-tools/`。旧版本安装在默认 adbx 专用目录中的工具仍可识别，清理清单可用 `--purge --dry-run` 预览。
+
 ---
 
 ## 快速上手与常用命令
@@ -102,6 +117,7 @@ adbx update             # 或 adbx upgrade，自动下载并更新
 
 ```bash
 adbx devices                         # 列出设备（* 标记当前终端锁定的目标，支持 -l / --json）
+adbx list --json                     # list 是 devices 的别名，输出相同的设备清单
 adbx alias 7c9349cc5027c4c7 cayin    # 为序列号绑定人类可读别名
 adbx group set qa cayin pixel        # 创建设备分组 qa
 
@@ -110,6 +126,10 @@ adbx current --prompt                # 输出 [adb:cayin (7c9349cc...)]，可集
 adbx unuse                           # 取消当前窗口锁定
 ```
 
+锁定的单台设备离线时，设备命令会报错退出。重新连接该设备、执行 `adbx use <新目标>` 或显式传入 `--device` 后可继续。
+
+`adbx use A,B` 在选定时保存两台设备的完整序列号。CLI 和 REPL 都要求原设备全部在线；后来添加的同名分组或相似序列号不会改变这把锁。使用 `adbx use --group qa` 可锁定动态分组，后续命令会采用分组当时的成员。旧会话的目标名与现有分组重名且无法判定原意时，按提示重新锁定一次。
+
 ### 2. 多机并行（锁定单机后也能随时覆盖）
 
 ```bash
@@ -117,12 +137,19 @@ adbx --all shell getprop ro.product.model      # 对全部在线设备并行执�
 adbx --pick reboot                             # 交互式多选设备并行执行
 adbx --group qa shell id                       # 仅对分组 qa 并行执行
 adbx --device cayin,pixel install+ app.apk     # 指定多台设备并行执行
+adbx --all pull /sdcard/run.log out/           # 分别保存到 out/<设备序列号>/run.log
 
 # 通过管道过滤时自动为每行附加对齐的 [设备名] 前缀，一眼区分归属设备：
 adbx --all shell getprop | grep adb
 ```
 
 > 所有前置参数均向下兼容旧简写 `@all` / `@pick` / `@<别名或分组>`；若要 100% 原样透传原生 `adb`（跳过增强逻辑），使用 `adbx -- <args>`。
+
+`--device` 选择设备序列号或别名；需要运行整个分组时使用 `--group`。增强模式会在选机前检查顶层子命令。输入 `adbx ali` 会提示 `adbx alias`。厂商扩展或新版 ADB 新增的命令可通过 `adbx -- <命令> [参数]` 直接调用。
+
+多台设备执行 `pull` 时，省略本地路径会在当前目录按序列号建子目录。已有目录可直接使用；拉取一个远端路径到新目录时请写成 `out/`。指定同一个本地文件会在传输前报错。Wi-Fi 序列号中的冒号编码为 `%3A`。只选中一台设备时沿用原生 `adb pull` 的路径规则。
+
+当两个序列号只差大小写时，先创建的设备目录保留原拼写，另一台设备使用以 `%s-` 开头的编码目录。后续批次重复使用各自的目录。
 
 ### 3. 增强型 Shell（`adbx shell` / `adbx repl`）
 
@@ -135,6 +162,8 @@ adbx shell --raw    # 直接启动原生 adb shell PTY
 - **`Tab` 智能补全**：补全命令名、远端设备路径（如 `cat proc/asound/c`，含 3 秒目录缓存）以及 `:use` 目标。
 - **权限与交互支持**：输入 `su` 自动探测并切换为 `#` 提权模式（支持 `su -c` / `su 0` 与原生 `uid=0`）；输入 `vi` / `top` 自动分配 PTY；输入 `:raw` 临时切入原生 `adb shell`，退出后回到增强 Shell。
 - **快捷内建指令**：`:use <别名|all|组>`、`:devices`、`:history`、`:clear`、`:help`。
+
+`adbx repl > session.txt` 会把设备输出写入文件。终端输入使用简单的行提示，提示和回显写入 stderr；拔掉当前单台设备时仍会自动退出。
 
 ### 4. 彩色 `logcat` 与交互式 `adbx log` TUI
 
@@ -161,6 +190,14 @@ adbx log --tail 100 --level W    # 非交互拉取最近 100 条 Warn+ 日志（
 - **无线与端口管理**：`adbx wifi enable` / `list` / `reconnect`；`adbx port add reverse 8081 8081` / `sync -t all`。
 - **命令历史与宏**：`adbx h`（交互重放）、`adbx history export out.sh`、`adbx macro set`、`adbx menu`（或 `adbx ?`）。
 
+历史记录保存执行当时的完整设备序列号，批量命令保存当时选中的设备清单。交互重放和导出的 Shell 脚本均使用这份清单；任一原设备离线，整条命令停止。需要改在另一台设备执行，或要重放只有显示名称的旧记录时，运行 `adbx history replay --serial <完整序列号>` 后选择命令。可重复传入 `--serial` 指定多台设备。
+
+涉及本地相对路径的命令（如 `push settings.txt`、`install app.apk` 或省略本地目标的 `pull`）会记录并使用原工作目录。目录已删除时重放会停止；旧记录缺少目录，或确实需要换目录时，可指定 `history replay --cwd <目录>`。
+
+`port sync` 会在应用预设前检查主机端口冲突。固定 `forward` 端口一次只能同步到一台设备；多台设备可使用 `forward tcp:0` 分配独立端口，或使用设备端的 `reverse` 规则。
+
+`config edit` 会打开临时草稿。保存时若发现另一终端已更新配置，会保留最新配置和你的草稿，并输出草稿路径供对照。
+
 ---
 
 ## 宿主机动态 Tab 补全配置
@@ -186,7 +223,7 @@ adbx log --tail 100 --level W    # 非交互拉取最近 100 条 Warn+ 日志（
 
 ## 原生 MCP Server（AI Agent 集成）
 
-`adbx mcp` 通过 stdio 提供原生 JSON-RPC 2.0 MCP 服务，默认启用**只读白名单安全模式**（仅放行 `getprop`、`dumpsys`、`pm list/path`、`ls`、`cat`、`ps` 等只读命令，禁止 shell 链式注入与 `pm clear`）；需要完全权限时可显式传入 `--allow-destructive`。
+`adbx mcp` 通过 stdio 提供 JSON-RPC 2.0 服务。默认模式可列出设备、读取日志、截图、获取 UI 树，并通过 `run_shell` 执行只读查询，例如 `getprop ro.product.model`、`dumpsys activity top` 和 `wm size`。
 
 ```json
 {
@@ -199,7 +236,7 @@ adbx log --tail 100 --level W    # 非交互拉取最近 100 条 Warn+ 日志（
 }
 ```
 
-可用工具：`list_devices`、`get_logcat`、`take_screenshot`、`dump_ui_tree`、`ui_tap`、`ui_swipe`、`ui_input`、`ui_keyevent`、`run_shell`、`app_action`。
+默认提供 `list_devices`、`get_logcat`、`take_screenshot`、`dump_ui_tree` 和 `run_shell`。使用 `adbx mcp --allow-destructive` 启动后，才会开放 UI 点击、滑动、输入、按键、应用启动与停止、清除应用数据和完整 Shell。
 
 ---
 
@@ -210,7 +247,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-推送版本标签（例如 `git tag -a v0.0.2 -m "Release v0.0.2" && git push origin v0.0.2`）后，[.github/workflows/release.yml](.github/workflows/release.yml) 会自动构建 macOS（arm64/x86_64）、Linux（musl x86_64/arm64 + `.deb`）、Windows（x86_64 `.zip`）归档，生成 `SHA256SUMS.txt`、Homebrew `adbx.rb`、Scoop `adbx.json`、Arch `PKGBUILD`、Chocolatey 与 Winget 清单并发布至 GitHub Releases。
+推送版本标签（例如 `git tag -a v0.0.3 -m "Release v0.0.3" && git push origin v0.0.3`）后，[.github/workflows/release.yml](.github/workflows/release.yml) 会自动构建 macOS（arm64/x86_64）、Linux（musl x86_64/arm64 + `.deb`）、Windows（x86_64 `.zip`）归档，生成 `SHA256SUMS.txt`、Homebrew `adbx.rb`、Scoop `adbx.json`、Arch `PKGBUILD`、Chocolatey 与 Winget 清单并发布至 GitHub Releases。
 
 ---
 

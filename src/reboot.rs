@@ -39,11 +39,8 @@ pub fn run_smart_reboot(
 
     println!("[adbx] 正在重启设备 {label} ({serial})...");
     let cap = adb::run_captured_with_timeout(adb_path, Some(serial), &reboot_args, 15)?;
-    if cap.exit_code != 0 && !cap.stderr.is_empty() {
-        eprintln!(
-            "[adbx] reboot 输出提示: {}",
-            String::from_utf8_lossy(&cap.stderr).trim()
-        );
+    if cap.exit_code != 0 {
+        bail!("设备 {serial} 重启失败 (exit={}): {}", cap.exit_code, String::from_utf8_lossy(&cap.stderr).trim());
     }
 
     // 若重启进 bootloader/recovery 或未要求等待恢复，则直接结束
@@ -132,7 +129,7 @@ pub fn run_smart_reboot(
             opts.restore_remount
         );
         if selector::is_interactive_tty() {
-            return crate::repl::run_repl(adb_path, serial.to_string(), store);
+            return crate::repl::run_repl(adb_path, crate::store::DeviceTarget::single(serial), store);
         }
         return adb::run_passthrough(adb_path, Some(serial), &["shell".into()]);
     }

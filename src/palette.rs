@@ -122,7 +122,7 @@ pub fn execute_macro(action_id: &str, adb_path: &PathBuf, serial: &str, store: &
 
     let label = store.display_label(serial);
     match action_id {
-        "shell" => crate::repl::run_repl(adb_path, serial.to_string(), store),
+        "shell" => crate::repl::run_repl(adb_path, crate::store::DeviceTarget::single(serial), store),
         "shell-raw" => run_echoed(adb_path, Some(serial), &["shell"]),
         "logcat" => {
             let pkg = pick_optional_package(serial)?;
@@ -206,7 +206,7 @@ pub fn execute_macro(action_id: &str, adb_path: &PathBuf, serial: &str, store: &
             run_echoed(adb_path, Some(serial), &["shell", "ip", "-f", "inet", "addr", "show", "wlan0"])
         }
         "port-list" => crate::port::list_ports(adb_path, serial, store),
-        "history" => crate::history::replay_history(adb_path, store, 100),
+        "history" => crate::history::replay_history(adb_path, store, 100, &[], None),
         "restart-server" => {
             run_echoed(adb_path, None, &["kill-server"])?;
             run_echoed(adb_path, None, &["start-server"])

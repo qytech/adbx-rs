@@ -197,7 +197,7 @@ pub fn run_watch_tui(adb_path: PathBuf) -> Result<()> {
         if !devices.is_empty() && selected >= devices.len() {
             selected = devices.len() - 1;
         }
-        let locked = store.get_session_device(&session_id);
+        let locked = store.session_target(&session_id)?;
 
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -217,7 +217,7 @@ pub fn run_watch_tui(adb_path: PathBuf) -> Result<()> {
                 .enumerate()
                 .map(|(i, d)| {
                     let is_sel = i == selected;
-                    let is_locked = locked.as_deref() == Some(d.serial.as_str());
+                    let is_locked = locked.as_ref().and_then(crate::store::DeviceTarget::single_serial) == Some(d.serial.as_str());
                     let mark = match (is_sel, is_locked) {
                         (true, true) => ">*",
                         (true, false) => "> ",
@@ -313,7 +313,7 @@ pub fn run_watch_tui(adb_path: PathBuf) -> Result<()> {
                     }
                     KeyCode::Enter => {
                         if let Some(d) = devices.get(selected) {
-                            store.set_session_device(&session_id, &d.serial)?;
+                            store.set_session_target(&session_id, &crate::store::DeviceTarget::single(&d.serial))?;
                             notice = format!(
                                 "已锁定当前终端会话 -> {} ({})",
                                 store.display_label(&d.serial),

@@ -83,12 +83,9 @@ fn resolve_completion_serial() -> Option<String> {
                     model: d.model.clone(),
                 })
                 .collect();
-            if let Ok(serial) = st.resolve_input_to_serial(&explicit, &devs) {
-                return Some(serial);
-            }
-        } else if let Some(d) = online.iter().find(|d| d.serial == explicit || d.serial.starts_with(&explicit)) {
-            return Some(d.serial.clone());
+            return st.resolve_input_to_serial(&explicit, &devs).ok();
         }
+        return None;
     }
 
     if let Ok(env_dev) = std::env::var("ADBX_DEVICE") {
@@ -101,15 +98,15 @@ fn resolve_completion_serial() -> Option<String> {
                     }
                 }
             }
+            return None;
         }
     }
 
     if let Some(st) = &store {
         let sid = session::current_session_id();
-        if let Some(locked) = st.get_session_device(&sid) {
-            if online.iter().any(|d| d.serial == locked) {
-                return Some(locked);
-            }
+        if let Some(locked) = st.session_target(&sid).ok()? {
+            let serial = locked.single_serial()?;
+            return online.iter().any(|d| d.serial == serial).then(|| serial.to_owned());
         }
     }
 

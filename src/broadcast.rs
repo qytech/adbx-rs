@@ -19,6 +19,7 @@ pub enum OutputMode {
 
 #[derive(Debug, Clone)]
 pub struct BroadcastOptions {
+    pub cwd: Option<PathBuf>,
     pub mode_override: Option<OutputMode>,
     pub max_jobs: usize,
     pub timeout_secs: u64,
@@ -32,6 +33,7 @@ struct TargetDevice {
     index: usize,
     label: String,
     serial: String,
+    args: Vec<String>,
     color_code: &'static str,
 }
 
@@ -137,6 +139,7 @@ pub fn parse_broadcast_args(raw: &[String]) -> Result<BroadcastOptions> {
     }
 
     Ok(BroadcastOptions {
+        cwd: None,
         mode_override,
         max_jobs,
         timeout_secs,
@@ -210,13 +213,59 @@ pub fn run_broadcast(
         list
     };
 
-    let targets: Vec<TargetDevice> = selected_devices
+    let serials: Vec<_> = selected_devices.into_iter().map(|d| d.serial).collect();
+    run_on_serials(&serials, opts, adb_path, store, Some(&format!("@{target_spec}")))
+}
+
+pub fn run_locked(
+    target: &crate::store::DeviceTarget,
+    opts: BroadcastOptions,
+    adb_path: &PathBuf,
+    store: &Store,
+) -> Result<u8> {
+    let online: Vec<_> = adb::list_devices(adb_path)?
         .into_iter()
+        .filter(|d| d.state == "device")
+        .collect();
+    let serials: Vec<_> = store
+        .locked_devices(target, &online)?
+        .into_iter()
+        .map(|d| d.serial)
+        .collect();
+    run_on_serials(
+        &serials,
+        opts,
+        adb_path,
+        store,
+        Some(&format!("@{}", target.spec())),
+    )
+}
+
+/// 已解析的序列号必须原样传给 adb，即使设备在查询后掉线也不可再做前缀或别名匹配。
+pub fn run_on_serials(
+    serials: &[String],
+    opts: BroadcastOptions,
+    adb_path: &PathBuf,
+    store: &Store,
+    history_target: Option<&str>,
+) -> Result<u8> {
+    if serials.is_empty() || is_interactive_command(&opts.adb_args) {
+        bail!("并行执行需要至少一台目标设备和非交互式命令");
+    }
+    let commands = if serials.len() > 1 && adb::after_wait_prefix(&opts.adb_args)[0] == "pull" {
+        crate::pull::per_device_args(&opts.adb_args, serials, opts.cwd.as_deref())?
+    } else {
+        vec![opts.adb_args.clone(); serials.len()]
+    };
+    let targets: Vec<TargetDevice> = serials
+        .iter()
+        .zip(commands)
         .enumerate()
-        .map(|(idx, d)| TargetDevice {
+        .map(|(idx, (serial, args))| TargetDevice {
             index: idx,
-            label: store.display_label(&d.serial),
-            serial: d.serial,
+            label: store.display_label(serial),
+            serial: serial.clone(),
+            args,
             color_code: ANSI_PALETTE[idx % ANSI_PALETTE.len()],
         })
         .collect();
@@ -240,13 +289,26 @@ pub fn run_broadcast(
             .unwrap_or_else(|| default_mode_for(&opts.adb_args))
     };
 
-    match mode {
+    let started = Instant::now();
+    let code = match mode {
         OutputMode::Grouped => run_grouped(adb_path, &targets, &opts),
         OutputMode::Stream => run_streamed(adb_path, &targets, &opts),
+    }?;
+    if let Some(target) = history_target {
+        crate::history::record(
+            store,
+            target,
+            serials,
+            &opts.adb_args,
+            code,
+            started.elapsed().as_millis(),
+        );
     }
+    Ok(code)
 }
 
 fn is_interactive_command(args: &[String]) -> bool {
+    let args = adb::after_wait_prefix(args);
     if args.is_empty() {
         return true;
     }
@@ -255,6 +317,7 @@ fn is_interactive_command(args: &[String]) -> bool {
 }
 
 fn default_mode_for(args: &[String]) -> OutputMode {
+    let args = adb::after_wait_prefix(args);
     if let Some(first) = args.first() {
         if matches!(
             first.as_str(),
@@ -278,11 +341,11 @@ fn run_grouped(adb_path: &PathBuf, targets: &[TargetDevice], opts: &BroadcastOpt
                 let Some(target) = target else { break };
 
                 // 修复：复用带硬超时的执行器，单台 USB 假死不会拖死其余设备
-                let res = match adb::run_captured_with_timeout(
+                let res = match adb::run_captured_in(
                     adb_path,
                     Some(&target.serial),
-                    &opts.adb_args,
-                    opts.timeout_secs,
+                    &target.args,
+                    opts.timeout_secs, opts.cwd.as_deref(),
                 ) {
                     Ok(cap) => DeviceResult {
                         index: target.index,
@@ -431,12 +494,12 @@ fn run_streamed(adb_path: &PathBuf, targets: &[TargetDevice], opts: &BroadcastOp
     let queue = Mutex::new(targets.iter().collect::<VecDeque<_>>());
     let summary = Mutex::new((0usize, 0usize));
     let worker_count = opts.max_jobs.min(targets.len()).max(1);
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<(bool, String)>();
 
     thread::scope(|s| {
         let printer = s.spawn(move || {
-            for line in rx {
-                println!("{line}");
+            for (stderr, line) in rx {
+                if stderr { eprintln!("{line}"); } else { println!("{line}"); }
             }
         });
 
@@ -460,10 +523,11 @@ fn run_streamed(adb_path: &PathBuf, targets: &[TargetDevice], opts: &BroadcastOp
                     )
                 };
 
-                let child = Command::new(adb_path)
-                    .arg("-s")
+                let mut command = Command::new(adb_path);
+                if let Some(cwd) = &opts.cwd { command.current_dir(cwd); }
+                let child = command.arg("-s")
                     .arg(&target.serial)
-                    .args(&opts.adb_args)
+                    .args(&target.args)
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -472,7 +536,7 @@ fn run_streamed(adb_path: &PathBuf, targets: &[TargetDevice], opts: &BroadcastOp
                 let mut child = match child {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx_worker.send(format!("{prefix} 启动 adb 失败: {e}"));
+                        let _ = tx_worker.send((true, format!("{prefix} 启动 adb 失败: {e}")));
                         summary_ref.lock().unwrap().1 += 1;
                         continue;
                     }
@@ -491,7 +555,7 @@ fn run_streamed(adb_path: &PathBuf, targets: &[TargetDevice], opts: &BroadcastOp
                         let p = prefix.clone();
                         inner.spawn(move || {
                             for line in BufReader::new(out).lines().map_while(Result::ok) {
-                                let _ = tx_out.send(format!("{p} {line}"));
+                                let _ = tx_out.send((false, format!("{p} {line}")));
                             }
                         });
                     }
@@ -500,7 +564,7 @@ fn run_streamed(adb_path: &PathBuf, targets: &[TargetDevice], opts: &BroadcastOp
                         let p = prefix.clone();
                         inner.spawn(move || {
                             for line in BufReader::new(err).lines().map_while(Result::ok) {
-                                let _ = tx_err.send(format!("{p} [stderr] {line}"));
+                                let _ = tx_err.send((true, format!("{p} [stderr] {line}")));
                             }
                         });
                     }
@@ -516,10 +580,10 @@ fn run_streamed(adb_path: &PathBuf, targets: &[TargetDevice], opts: &BroadcastOp
                                     timed_out = true;
                                     let _ = child.kill();
                                     let _ = child.wait();
-                                    let _ = tx_worker.send(format!(
+                                    let _ = tx_worker.send((true, format!(
                                         "{prefix} [TIMEOUT {}s - 已中止该设备命令]",
                                         opts.timeout_secs
-                                    ));
+                                    )));
                                     break;
                                 }
                                 thread::sleep(Duration::from_millis(50));

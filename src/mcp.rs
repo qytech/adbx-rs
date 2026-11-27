@@ -84,7 +84,7 @@ fn dispatch(method: &str, params: &Value, allow_destructive: bool) -> Result<Val
             "serverInfo": { "name": "adbx", "version": env!("CARGO_PKG_VERSION") }
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+        "tools/list" => Ok(json!({ "tools": tool_definitions(allow_destructive) })),
         "tools/call" => handle_tool_call(params, allow_destructive),
         "resources/list" => Ok(json!({
             "resources": [{
@@ -99,8 +99,12 @@ fn dispatch(method: &str, params: &Value, allow_destructive: bool) -> Result<Val
     }
 }
 
-fn tool_definitions() -> Value {
-    json!([
+fn readonly_tool(name: &str) -> bool {
+    matches!(name, "list_devices" | "get_logcat" | "take_screenshot" | "dump_ui_tree" | "run_shell")
+}
+
+fn tool_definitions(allow_destructive: bool) -> Value {
+    let mut tools = json!([
         {
             "name": "list_devices",
             "description": "List all connected Android ADB devices with aliases, groups, serials, states, and models.",
@@ -210,7 +214,7 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["command"]
             },
-            "annotations": { "readOnlyHint": false, "destructiveHint": true }
+            "annotations": { "readOnlyHint": !allow_destructive, "destructiveHint": allow_destructive }
         },
         {
             "name": "app_action",
@@ -226,7 +230,11 @@ fn tool_definitions() -> Value {
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": true }
         }
-    ])
+    ]);
+    if !allow_destructive {
+        tools.as_array_mut().unwrap().retain(|tool| readonly_tool(tool["name"].as_str().unwrap()));
+    }
+    tools
 }
 
 fn handle_resource_read(params: &Value) -> Result<Value> {
@@ -249,6 +257,14 @@ fn handle_resource_read(params: &Value) -> Result<Value> {
 fn handle_tool_call(params: &Value, allow_destructive: bool) -> Result<Value> {
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+
+    let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+    if !allow_destructive && (!readonly_tool(name) || (name == "run_shell" && !adb::is_readonly_mcp_shell(command))) {
+        return Ok(text_tool_result(
+            format!("Blocked by read-only mode: {name}. State changes and unrestricted shell require --allow-destructive."),
+            true,
+        ));
+    }
 
     let adb_path = adb::find_adb_binary()?;
     let store = Store::load()?;
@@ -298,27 +314,22 @@ fn handle_tool_call(params: &Value, allow_destructive: bool) -> Result<Value> {
         }
         "dump_ui_tree" => {
             let serial = resolve_mcp_device(&adb_path, &store, args.get("device").and_then(|v| v.as_str()))?;
-            let remote = "/sdcard/adbx_window_dump.xml";
-            let _ = adb::run_captured_with_timeout(
-                &adb_path,
-                Some(&serial),
-                &["shell".into(), "uiautomator".into(), "dump".into(), remote.into()],
+            // 强制分配远端 PTY，让 uiautomator 直接写回终端，不在设备上创建文件。
+            let cap = adb::run_captured_with_timeout(
+                &adb_path, Some(&serial),
+                &["shell".into(), "-tt".into(), "uiautomator".into(), "dump".into(), "/dev/tty".into()],
                 15,
             )?;
-            let cap = adb::run_captured_with_timeout(
-                &adb_path,
-                Some(&serial),
-                &["shell".into(), "cat".into(), remote.into()],
-                10,
-            )?;
-            let _ = adb::run_captured_with_timeout(
-                &adb_path,
-                Some(&serial),
-                &["shell".into(), "rm".into(), "-f".into(), remote.into()],
-                5,
-            );
-            let xml = truncate_utf8(&String::from_utf8_lossy(&cap.stdout), MAX_TEXT_BYTES * 2);
-            Ok(text_tool_result(xml, cap.exit_code != 0))
+            let output = String::from_utf8_lossy(&cap.stdout);
+            if cap.exit_code == 0 {
+                if let (Some(start), Some(end)) = (output.find("<hierarchy"), output.rfind("</hierarchy>")) {
+                    if start < end {
+                        return Ok(text_tool_result(truncate_utf8(&output[start..end + "</hierarchy>".len()], MAX_TEXT_BYTES * 2), false));
+                    }
+                }
+            }
+            Ok(text_tool_result(format!("UI dump failed (exit={}): {}", cap.exit_code,
+                truncate_utf8(&format!("{output} {}", String::from_utf8_lossy(&cap.stderr)), 4096)), true))
         }
         "ui_tap" => {
             let serial = resolve_mcp_device(&adb_path, &store, args.get("device").and_then(|v| v.as_str()))?;
@@ -418,18 +429,9 @@ fn handle_tool_call(params: &Value, allow_destructive: bool) -> Result<Value> {
             ))
         }
         "run_shell" => {
-            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let command = command.trim();
             if command.is_empty() {
                 return Ok(text_tool_result("Missing required parameter: command".into(), true));
-            }
-            // 安全加固：默认模式下启用只读白名单，彻底杜绝黑名单绕过
-            if !allow_destructive && !adb::is_readonly_mcp_shell(command) {
-                return Ok(text_tool_result(
-                    format!(
-                        "Blocked non-readonly shell command `{command}` in safe mode. Allowed prefixes: getprop, dumpsys, pm list/path, ls, cat, ps, wm, ip, df, pidof (no shell chaining). Restart with `adbx mcp --allow-destructive` for full shell."
-                    ),
-                    true,
-                ));
             }
             let timeout = args.get("timeout_sec").and_then(|v| v.as_u64()).unwrap_or(15).clamp(1, 60);
             let dev_arg = args.get("device").and_then(|v| v.as_str()).map(|s| s.trim_start_matches('@'));
@@ -509,12 +511,6 @@ fn handle_tool_call(params: &Value, allow_destructive: bool) -> Result<Value> {
                 Err(e) => return Ok(text_tool_result(format!("{e}"), true)),
             };
             let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-            if action == "clear" && !allow_destructive {
-                return Ok(text_tool_result(
-                    "Action `clear` is blocked in safe mode. Start with `adbx mcp --allow-destructive`.".into(),
-                    true,
-                ));
-            }
             let serial = resolve_mcp_device(&adb_path, &store, args.get("device").and_then(|v| v.as_str()))?;
             let adb_args: Vec<String> = match action {
                 "launch" => vec![
@@ -618,6 +614,14 @@ mod tests {
         let arr = tools["tools"].as_array().unwrap();
         assert!(arr.iter().any(|t| t["name"] == "run_shell"));
         assert!(arr.iter().any(|t| t["name"] == "get_logcat"));
+        let full = dispatch("tools/list", &json!({}), true).unwrap();
+        for name in ["ui_tap", "ui_swipe", "ui_input", "ui_keyevent", "app_action"] {
+            assert!(!arr.iter().any(|t| t["name"] == name));
+            assert!(full["tools"].as_array().unwrap().iter().any(|t| t["name"] == name));
+            let denied = dispatch("tools/call", &json!({ "name": name }), false).unwrap();
+            assert_eq!(denied["isError"], true);
+            assert!(denied["content"][0]["text"].as_str().unwrap().contains("--allow-destructive"));
+        }
     }
 
     #[test]
@@ -630,22 +634,20 @@ mod tests {
 
     #[test]
     fn safe_mode_blocks_destructive_shell_and_clear() {
-        if adb::find_adb_binary().is_ok() {
-            let shell_res = dispatch(
-                "tools/call",
-                &json!({ "name": "run_shell", "arguments": { "command": "rm -rf /sdcard/a" } }),
-                false,
-            )
-            .unwrap();
-            assert_eq!(shell_res["isError"], true);
+        let shell_res = dispatch(
+            "tools/call",
+            &json!({ "name": "run_shell", "arguments": { "command": "rm -rf /sdcard/a" } }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(shell_res["isError"], true);
 
-            let clear_res = dispatch(
-                "tools/call",
-                &json!({ "name": "app_action", "arguments": { "pkg": "com.example.app", "action": "clear" } }),
-                false,
-            )
-            .unwrap();
-            assert_eq!(clear_res["isError"], true);
-        }
+        let clear_res = dispatch(
+            "tools/call",
+            &json!({ "name": "app_action", "arguments": { "pkg": "com.example.app", "action": "clear" } }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(clear_res["isError"], true);
     }
 }

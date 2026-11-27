@@ -151,6 +151,7 @@ pub fn parse_threadtime_raw(raw: &str) -> ParsedLine {
 #[derive(Debug, Clone)]
 struct LogEntry {
     seq: u64,
+    package_epoch: Option<u64>,
     timestamp: String,
     pid: String,
     level: LogLevel,
@@ -212,6 +213,8 @@ struct AppState {
     tracked_pids: Arc<RwLock<HashSet<String>>>,
     pids_version: Arc<AtomicU64>,
     seen_pids_version: u64,
+    package_epoch: u64,
+    pid_scan_from: u64,
     paused: bool,
     scroll_from_bottom: usize,
     mode: InputMode,
@@ -233,14 +236,14 @@ impl AppState {
             .ok()
     }
 
-    fn matches(&self, entry: &LogEntry, active_pkg: &Option<String>, pids: &HashSet<String>) -> bool {
+    fn matches(&self, entry: &LogEntry, active_pkg: &Option<String>) -> bool {
         if entry.is_banner {
             return true;
         }
         if entry.level < self.min_level {
             return false;
         }
-        if active_pkg.is_some() && (pids.is_empty() || !pids.contains(&entry.pid)) {
+        if active_pkg.is_some() && entry.package_epoch != Some(self.package_epoch) {
             return false;
         }
         if let Some(re) = &self.include_regex {
@@ -268,7 +271,10 @@ impl AppState {
             }
         }
 
-        let matched = self.matches(&entry, active_pkg, pids);
+        if active_pkg.is_some() && pids.contains(&entry.pid) {
+            entry.package_epoch = Some(self.package_epoch);
+        }
+        let matched = self.matches(&entry, active_pkg);
         let seq = entry.seq;
         self.entries.push_back(entry);
         if matched {
@@ -286,12 +292,24 @@ impl AppState {
         }
     }
 
+    fn refresh_package_matches(&mut self) {
+        // Attribute newly buffered lines once. A PID disappearing must not hide
+        // a crash that was already observed in this package-filter session.
+        let pids = self.tracked_pids.read().unwrap();
+        let start = self.pid_scan_from.saturating_sub(self.base_seq) as usize;
+        for entry in self.entries.iter_mut().skip(start) {
+            if pids.contains(&entry.pid) { entry.package_epoch = Some(self.package_epoch); }
+        }
+        self.pid_scan_from = self.next_seq;
+        drop(pids);
+        self.rebuild_filter_cache();
+    }
+
     fn rebuild_filter_cache(&mut self) {
         let active_pkg = self.package_name.read().unwrap().clone();
-        let pids = self.tracked_pids.read().unwrap().clone();
         self.filtered_seqs.clear();
         for entry in &self.entries {
-            if self.matches(entry, &active_pkg, &pids) {
+            if self.matches(entry, &active_pkg) {
                 self.filtered_seqs.push_back(entry.seq);
             }
         }
@@ -391,7 +409,7 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
                 };
                 {
                     let mut guard = pids_ref.write().unwrap();
-                    if *guard != new_pids {
+                    if change_ref.load(Ordering::Acquire) == last_change && *guard != new_pids {
                         *guard = new_pids;
                         ver_ref.fetch_add(1, Ordering::Relaxed);
                     }
@@ -497,6 +515,8 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
         tracked_pids,
         pids_version,
         seen_pids_version: 0,
+        package_epoch: 0,
+        pid_scan_from: 0,
         paused: false,
         scroll_from_bottom: 0,
         mode: InputMode::Normal,
@@ -512,7 +532,7 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
         let cur_ver = state.pids_version.load(Ordering::Relaxed);
         if cur_ver != state.seen_pids_version {
             state.seen_pids_version = cur_ver;
-            state.rebuild_filter_cache();
+            state.refresh_package_matches();
         }
 
         let active_pkg = state.package_name.read().unwrap().clone();
@@ -639,13 +659,17 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
                                         if val.is_empty() {
                                             *state.package_name.write().unwrap() = None;
                                             state.tracked_pids.write().unwrap().clear();
-                                            pkg_change_ver.fetch_add(1, Ordering::Relaxed);
+                                            state.package_epoch += 1;
+                                            state.pid_scan_from = state.base_seq;
+                                            pkg_change_ver.fetch_add(1, Ordering::Release);
                                         } else if let Err(e) = RegexBuilder::new(&val).case_insensitive(true).build() {
                                             state.status_notice = format!("包名正则无效: {e}");
                                         } else {
                                             *state.package_name.write().unwrap() = Some(val);
                                             state.tracked_pids.write().unwrap().clear();
-                                            pkg_change_ver.fetch_add(1, Ordering::Relaxed);
+                                            state.package_epoch += 1;
+                                            state.pid_scan_from = state.base_seq;
+                                            pkg_change_ver.fetch_add(1, Ordering::Release);
                                         }
                                     }
                                     InputMode::Normal => {}
@@ -675,6 +699,7 @@ pub fn run_tui(opts: LogcatOptions) -> Result<()> {
 fn make_banner(msg: &str) -> LogEntry {
     LogEntry {
         seq: 0,
+        package_epoch: None,
         timestamp: Local::now().format("%H:%M:%S").to_string(),
         pid: "-".into(),
         level: LogLevel::Warn,
@@ -693,6 +718,7 @@ fn to_log_entry(raw: &str) -> LogEntry {
         || raw.contains("Fatal signal ");
     LogEntry {
         seq: 0,
+        package_epoch: None,
         timestamp: p.timestamp,
         pid: p.pid,
         level: p.level,
@@ -1230,6 +1256,8 @@ mod tests {
             tracked_pids: Arc::new(RwLock::new(HashSet::new())),
             pids_version: Arc::new(AtomicU64::new(0)),
             seen_pids_version: 0,
+        package_epoch: 0,
+        pid_scan_from: 0,
             paused: false,
             scroll_from_bottom: 0,
             mode: InputMode::Normal,

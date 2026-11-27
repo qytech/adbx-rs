@@ -4,19 +4,18 @@ use crate::cache;
 use crate::history;
 use crate::logcat;
 use crate::selector;
-use crate::store::Store;
+use crate::store::{DeviceTarget, Store};
 use anyhow::Result;
-use rustyline::completion::{Completer, Pair};
-use rustyline::config::{ColorMode, CompletionType, Config};
-use rustyline::error::ReadlineError;
-use rustyline::highlight::{CmdKind, Highlighter};
-use rustyline::hint::{Hinter, HistoryHinter};
+use reedline::{ColumnarMenu, Completer, DefaultPrompt, Emacs, FileBackedHistory, Hinter, History as InputHistory,
+    HistoryItem, KeyCode, KeyModifiers, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
+    Reedline, ReedlineEvent, ReedlineMenu, SearchQuery, Signal, Span, Suggestion};
+use rustyline::completion::Pair;
 use rustyline::history::{DefaultHistory, History};
-use rustyline::validate::Validator;
-use rustyline::{Context, Editor, Helper};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,7 +46,6 @@ type LsCacheKey = (String, RootMode, String, bool);
 struct ReplHelper {
     adb_path: PathBuf,
     state: Arc<Mutex<ReplState>>,
-    history_hinter: HistoryHinter,
     suggestions: Vec<String>,
     device_groups: Vec<String>,
     ls_cache: Mutex<HashMap<LsCacheKey, (Instant, Vec<String>)>>,
@@ -117,7 +115,6 @@ impl ReplHelper {
         Self {
             adb_path,
             state,
-            history_hinter: HistoryHinter::new(),
             suggestions,
             device_groups,
             ls_cache: Mutex::new(HashMap::new()),
@@ -125,53 +122,51 @@ impl ReplHelper {
     }
 }
 
-impl Helper for ReplHelper {}
+struct ShellPrompt<'a>(&'a str);
 
-impl Validator for ReplHelper {}
-
-impl Hinter for ReplHelper {
-    type Hint = String;
-
-    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
-        if line.is_empty() || pos < line.len() {
-            return None;
-        }
-        if let Some(h) = self.history_hinter.hint(line, pos, ctx) {
-            if !h.is_empty() {
-                return Some(h);
-            }
-        }
-        suggest_inline_suffix(&self.suggestions, line)
+impl Prompt for ShellPrompt<'_> {
+    fn render_prompt_left(&self) -> Cow<'_, str> { Cow::Borrowed(self.0) }
+    fn render_prompt_right(&self) -> Cow<'_, str> { Cow::Borrowed("") }
+    fn render_prompt_indicator(&self, _: PromptEditMode) -> Cow<'_, str> { Cow::Borrowed("") }
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> { Cow::Borrowed("> ") }
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
+        DefaultPrompt::default().render_prompt_history_search_indicator(search).into_owned().into()
     }
 }
 
-impl Highlighter for ReplHelper {
-    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(format!("\x1b[90m{hint}\x1b[0m"))
-    }
+struct ShellHints {
+    suggestions: Vec<String>,
+    current: String,
+}
 
-    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
-        &'s self,
-        prompt: &'p str,
-        _default: bool,
-    ) -> Cow<'b, str> {
-        Cow::Owned(format!("\x1b[1;36m{prompt}\x1b[0m"))
+impl Hinter for ShellHints {
+    fn handle(&mut self, line: &str, pos: usize, history: &dyn InputHistory, color: bool, _: &str) -> String {
+        self.current.clear();
+        if line.is_empty() || pos != line.len() { return String::new(); }
+        self.current = history.search(SearchQuery::last_with_prefix(line.into(), None)).ok()
+            .and_then(|items| items.first()?.command_line.strip_prefix(line).map(str::to_owned))
+            .filter(|hint| !hint.is_empty())
+            .or_else(|| suggest_inline_suffix(&self.suggestions, line)).unwrap_or_default();
+        if color { format!("\x1b[90m{}\x1b[0m", self.current) } else { self.current.clone() }
     }
-
-    fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {
-        false
+    fn complete_hint(&self) -> String { self.current.clone() }
+    fn next_hint_token(&self) -> String {
+        self.current.split_inclusive(char::is_whitespace).next().unwrap_or("").to_owned()
     }
 }
 
 impl Completer for ReplHelper {
-    type Candidate = Pair;
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        let (start, items) = self.candidates(line, pos);
+        items.into_iter().map(|item| Suggestion {
+            value: item.replacement, display_override: Some(item.display),
+            span: Span::new(start, pos), ..Suggestion::default()
+        }).collect()
+    }
+}
 
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+impl ReplHelper {
+    fn candidates(&self, line: &str, pos: usize) -> (usize, Vec<Pair>) {
         let prefix = &line[..pos];
 
         // Case A: `:use <target>`
@@ -216,7 +211,7 @@ impl Completer for ReplHelper {
                 }
             }
 
-            return Ok((":use ".len(), pairs));
+            return (":use ".len(), pairs);
         }
 
         // Case B: REPL 内置指令 (`:...`)
@@ -230,7 +225,7 @@ impl Completer for ReplHelper {
                     replacement: (*cmd).to_string(),
                 })
                 .collect();
-            return Ok((0, pairs));
+            return (0, pairs);
         }
 
         // Case C: 首个命令名补全（无空白、非路径前缀）
@@ -254,7 +249,7 @@ impl Completer for ReplHelper {
                     });
                 }
             }
-            return Ok((0, pairs));
+            return (0, pairs);
         }
 
         // Case D: 单机模式下远端设备路径补全
@@ -268,7 +263,7 @@ impl Completer for ReplHelper {
             )
         };
         if is_multi {
-            return Ok((pos, Vec::new()));
+            return (pos, Vec::new());
         }
 
         let token_start = prefix
@@ -291,7 +286,7 @@ impl Completer for ReplHelper {
                         replacement: format!("{dir_part}{entry}"),
                     })
                     .collect();
-                return Ok((token_start, pairs));
+                return (token_start, pairs);
             }
         }
 
@@ -307,11 +302,11 @@ impl Completer for ReplHelper {
             &["shell".into(), ls_cmd],
             2,
         ) else {
-            return Ok((pos, Vec::new()));
+            return (pos, Vec::new());
         };
 
         if cap.exit_code != 0 && cap.stdout.is_empty() {
-            return Ok((pos, Vec::new()));
+            return (pos, Vec::new());
         }
 
         let stdout = String::from_utf8_lossy(&cap.stdout);
@@ -339,7 +334,7 @@ impl Completer for ReplHelper {
             })
             .collect();
 
-        Ok((token_start, pairs))
+        (token_start, pairs)
     }
 }
 
@@ -380,31 +375,29 @@ fn resolve_remote_list_dir(cwd: &str, dir_part: &str) -> String {
 /// - `Tab` 补全常用命令、远端设备路径与 `:use` 目标，`↑`/`↓` 与 `Ctrl+R` 检索历史
 /// - 每条输入的远端命令自动写入 history.jsonl（支持后续 `adbx history` 检索与重放）
 /// - 支持虚拟工作目录 `cd <dir>`、`:use <设备/all/分组>` 热切换与 `:raw` 切入原生 PTY shell
-pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Result<u8> {
-    let config = Config::builder()
-        .completion_type(CompletionType::List)
-        .color_mode(ColorMode::Enabled)
-        .build();
-    let mut rl = Editor::<ReplHelper, DefaultHistory>::with_config(config)?;
-
+pub fn run_repl(adb_path: &PathBuf, mut target: DeviceTarget, store: &Store) -> Result<u8> {
     let repl_hist_file = store.repl_history_path();
-    let _ = rl.load_history(&repl_hist_file);
-
-    // 首次进入 REPL 时从全局 history.jsonl 预热历史建议
-    if rl.history().is_empty() {
+    let mut saved = DefaultHistory::new();
+    let _ = saved.load(&repl_hist_file);
+    if saved.is_empty() {
         for entry in history::load_entries(store) {
-            if entry.args.first().map(|s| s.as_str()) == Some("shell") && entry.args.len() >= 2 {
-                let cmd = entry.args[1..].join(" ");
-                if !cmd.trim().is_empty() {
-                    let _ = rl.add_history_entry(cmd);
-                }
+            if entry.args.first().is_some_and(|a| a == "shell") && entry.args.len() >= 2 {
+                let _ = saved.add(&entry.args[1..].join(" "));
             }
         }
     }
+    let mut input_history = FileBackedHistory::default();
+    for line in &saved {
+        input_history.save(HistoryItem::from_command_line(line.as_str()))?;
+    }
 
-    let mut current_target = initial_target.clone();
+    if matches!(target, DeviceTarget::Fixed(_)) {
+        let online: Vec<_> = adb::list_devices(adb_path)?.into_iter().filter(|d| d.state == "device").collect();
+        store.locked_devices(&target, &online)?;
+    }
+    let mut current_target = target.spec();
     let mut remote_cwd = "/".to_string();
-    let mut root_mode = if !is_multi_target(&current_target, store)
+    let mut root_mode = if target.single_serial().is_some()
         && is_native_root(adb_path, &current_target)
     {
         RootMode::NativeRoot
@@ -414,17 +407,30 @@ pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Re
     let state = Arc::new(Mutex::new(ReplState {
         current_target: current_target.clone(),
         remote_cwd: remote_cwd.clone(),
-        is_multi: is_multi_target(&current_target, store),
+        is_multi: target.single_serial().is_none(),
         root_mode,
     }));
 
     let helper = ReplHelper::new(adb_path.clone(), Arc::clone(&state), store);
-    rl.set_helper(Some(helper));
+    let hints = ShellHints { suggestions: helper.suggestions.clone(), current: String::new() };
+    let mut bindings = reedline::default_emacs_keybindings();
+    bindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, ReedlineEvent::UntilFound(vec![
+        ReedlineEvent::Menu("completion".into()), ReedlineEvent::MenuNext,
+    ]));
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let mut editor = Reedline::create()
+        .with_history(Box::new(input_history))
+        .with_completer(Box::new(helper))
+        .with_hinter(Box::new(hints))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(ColumnarMenu::default().with_name("completion"))))
+        .with_edit_mode(Box::new(Emacs::new(bindings)))
+        .with_break_signal(Arc::clone(&interrupt));
+    let mut exit_code = 0;
 
-    println!("已进入 adbx 增强 Shell（实时灰色命令建议按 → / Ctrl+E 采纳，Tab 补全命令与设备路径，↑/↓ 或 Ctrl+R 搜历史，:raw 切入原生 shell，:help 查看帮助）");
+    eprintln!("已进入 adbx 增强 Shell（实时灰色命令建议按 → / Ctrl+E 采纳，Tab 补全命令与设备路径，↑/↓ 或 Ctrl+R 搜历史，:raw 切入原生 shell，:help 查看帮助）");
 
     loop {
-        let is_multi = is_multi_target(&current_target, store);
+        let is_multi = target.single_serial().is_none();
         {
             let mut st = state.lock().unwrap();
             st.current_target = current_target.clone();
@@ -441,13 +447,14 @@ pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Re
             format!("[{label}:{remote_cwd}] {sym} ")
         };
 
-        match rl.readline(&prompt) {
-            Ok(raw_line) => {
+        let input = read_input(&mut editor, &prompt, adb_path, (!is_multi).then_some(current_target.as_str()), &interrupt);
+        match input {
+            Ok(Signal::Success(raw_line)) => {
                 let line = raw_line.trim();
                 if line.is_empty() {
                     continue;
                 }
-                let _ = rl.add_history_entry(line);
+                let _ = saved.add(line);
 
                 if line == ":q" {
                     break;
@@ -465,8 +472,10 @@ pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Re
                     continue;
                 }
                 if line == ":clear" {
-                    print!("\x1b[2J\x1b[H");
-                    let _ = std::io::stdout().flush();
+                    if std::io::stderr().is_terminal() {
+                        eprint!("\x1b[2J\x1b[H");
+                        let _ = std::io::stderr().flush();
+                    }
                     continue;
                 }
                 if line == ":raw" {
@@ -499,33 +508,22 @@ pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Re
                         println!("用法: :use <别名|序列号|all|分组名>");
                         continue;
                     }
-                    if clean.eq_ignore_ascii_case("all") {
-                        current_target = "all".to_string();
-                        root_mode = RootMode::None;
-                        println!("已切换 REPL 目标 -> @all（多机并行）");
-                    } else if store.group_members(clean).is_some() || clean.contains(',') {
-                        current_target = clean.to_string();
-                        root_mode = RootMode::None;
-                        println!("已切换 REPL 目标 -> @{current_target}（多机并行）");
-                    } else if let Ok(devs) = adb::list_devices(adb_path) {
-                        let online: Vec<_> = devs.into_iter().filter(|d| d.state == "device").collect();
-                        match store.resolve_input_to_serial(clean, &online) {
-                            Ok(serial) => {
-                                current_target = serial;
-                                remote_cwd = "/".to_string();
-                                root_mode = if is_native_root(adb_path, &current_target) {
-                                    RootMode::NativeRoot
-                                } else {
-                                    RootMode::None
-                                };
-                                println!(
-                                    "已切换 REPL 目标 -> {} ({})",
-                                    store.display_label(&current_target),
-                                    current_target
-                                );
-                            }
-                            Err(e) => eprintln!("切换失败: {e}"),
+                    let selected = (|| -> Result<DeviceTarget> {
+                        let config = Store::load()?;
+                        let online: Vec<_> = adb::list_devices(adb_path)?.into_iter().filter(|d| d.state == "device").collect();
+                        config.select_target(clean, &online)
+                    })();
+                    match selected {
+                        Ok(next) => {
+                            target = next;
+                            current_target = target.spec();
+                            remote_cwd = "/".into();
+                            root_mode = if target.single_serial().is_some() && is_native_root(adb_path, &current_target) {
+                                RootMode::NativeRoot
+                            } else { RootMode::None };
+                            println!("已切换 REPL 目标 -> {current_target}");
                         }
+                        Err(e) => eprintln!("切换失败: {e}"),
                     }
                     continue;
                 }
@@ -612,21 +610,24 @@ pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Re
                 } else {
                     line.to_string()
                 };
-                let adb_args = vec!["shell".to_string(), full_cmd.clone()];
-                let hist_args = vec!["shell".to_string(), line.to_string()];
+                let mut adb_args = vec!["shell".to_string()];
+                if !is_multi && needs_remote_pty(line) { adb_args.push("-t".into()); }
+                adb_args.push(full_cmd);
                 let started = Instant::now();
 
                 let code = if is_multi {
                     let opts = broadcast::BroadcastOptions {
+            cwd: None,
                         mode_override: Some(broadcast::OutputMode::Grouped),
                         max_jobs: 8,
                         timeout_secs: 30,
                         assume_yes: false,
                         no_color: false,
                         json_output: false,
-                        adb_args,
+                        adb_args: adb_args.clone(),
                     };
-                    match broadcast::run_broadcast(&current_target, opts, adb_path, store) {
+                    let result = Store::load().and_then(|cfg| broadcast::run_locked(&target, opts, adb_path, &cfg));
+                    match result {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("执行失败: {e:#}");
@@ -637,12 +638,6 @@ pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Re
                     let tokens: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
                     let res = if logcat::should_colorize_logcat(&tokens) {
                         logcat::run_colored_stream(adb_path, &current_target, &adb_args, store)
-                    } else if needs_remote_pty(line) {
-                        adb::run_passthrough(
-                            adb_path,
-                            Some(&current_target),
-                            &["shell".into(), "-t".into(), full_cmd],
-                        )
                     } else {
                         adb::run_passthrough(adb_path, Some(&current_target), &adb_args)
                     };
@@ -655,39 +650,184 @@ pub fn run_repl(adb_path: &PathBuf, initial_target: String, store: &Store) -> Re
                     }
                 };
 
-                let hist_target = if is_multi {
-                    format!("@{current_target}")
-                } else {
-                    store.display_label(&current_target)
-                };
-                history::record(
-                    store,
-                    &hist_target,
-                    &hist_args,
-                    code,
-                    started.elapsed().as_millis(),
-                );
+                if !is_multi {
+                    history::record(
+                        store, &store.display_label(&current_target), std::slice::from_ref(&current_target),
+                        &adb_args, code, started.elapsed().as_millis(),
+                    );
+                    if code != 0 && disconnected(adb_path, &current_target) {
+                        eprintln!("设备 {current_target} 已断开，已退出增强 Shell。");
+                        exit_code = 1;
+                        break;
+                    }
+                }
             }
-            Err(ReadlineError::Interrupted) => {
-                println!("^C");
+            Ok(Signal::CtrlC) => {
+                eprintln!("^C");
                 continue;
             }
-            Err(ReadlineError::Eof) => {
+            Ok(Signal::ExternalBreak(_)) => {
+                eprintln!("设备 {current_target} 已断开，已退出增强 Shell。");
+                exit_code = 1;
                 break;
             }
+            Ok(Signal::CtrlD) => {
+                break;
+            }
+            Ok(_) => continue,
             Err(err) => {
+                exit_code = 1;
                 eprintln!("REPL 读取异常: {err}");
                 break;
             }
         }
     }
 
-    let _ = rl.save_history(&repl_hist_file);
-    Ok(0)
+    let _ = saved.append(&repl_hist_file);
+    Ok(exit_code)
 }
 
-fn is_multi_target(target: &str, store: &Store) -> bool {
-    target == "all" || target.contains(',') || store.group_members(target).is_some()
+// A successful server snapshot distinguishes unplugging from a failed remote
+// command or a transient error querying adb. Never substitute another serial.
+fn disconnected(adb_path: &PathBuf, serial: &str) -> bool {
+    let Ok(cap) = adb::run_captured_with_timeout(adb_path, None, &["devices".into()], 2) else {
+        return false;
+    };
+    let output = String::from_utf8_lossy(&cap.stdout);
+    let mut lines = output.lines();
+    cap.exit_code == 0 && lines.next().is_some_and(|l| l.trim() == "List of devices attached")
+        && !lines.any(|l| {
+            let mut fields = l.split_whitespace();
+            fields.next() == Some(serial) && fields.next() == Some("device")
+        })
+}
+
+fn read_input(
+    editor: &mut Reedline,
+    prompt: &str,
+    adb_path: &PathBuf,
+    serial: Option<&str>,
+    interrupt: &Arc<AtomicBool>,
+) -> std::io::Result<Signal> {
+    if !std::io::stdin().is_terminal() {
+        let read_line = || -> std::io::Result<Signal> {
+            let mut line = String::new();
+            Ok(if std::io::stdin().read_line(&mut line)? == 0 {
+                Signal::CtrlD
+            } else {
+                Signal::Success(line)
+            })
+        };
+        let Some(serial) = serial else {
+            return read_line();
+        };
+        // A pipe may stay open without producing another byte. Only the main
+        // thread dispatches commands; an unplug exits the CLI without waiting for EOF.
+        let (send, input) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = send.send(read_line());
+        });
+        loop {
+            match input.recv_timeout(Duration::from_secs(1)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) if disconnected(adb_path, serial) => {
+                    return Ok(Signal::ExternalBreak(String::new()));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Signal::CtrlD),
+            }
+        }
+    }
+    let mut read = || {
+        if std::io::stdout().is_terminal() && std::io::stderr().is_terminal() {
+            editor.read_line(&ShellPrompt(prompt))
+        } else {
+            redirected_line(prompt, interrupt)
+        }
+    };
+    let Some(serial) = serial else {
+        return read();
+    };
+    std::thread::scope(|scope| {
+        let (done, stop) = mpsc::channel::<()>();
+        let watcher = scope.spawn(move || {
+            while let Err(mpsc::RecvTimeoutError::Timeout) =
+                stop.recv_timeout(Duration::from_secs(1))
+            {
+                if disconnected(adb_path, serial) {
+                    interrupt.store(true, Ordering::Release);
+                    return true;
+                }
+            }
+            false
+        });
+        let result = read();
+        drop(done);
+        let dropped = watcher.join().expect("device monitor");
+        interrupt.store(false, Ordering::Release);
+        if dropped {
+            Ok(Signal::ExternalBreak(String::new()))
+        } else {
+            result
+        }
+    })
+}
+
+/// Cursor-position queries go to stdout on some terminals. When stdout is data,
+/// keep the prompt and echo on stderr and read keys without a cursor query.
+fn redirected_line(prompt: &str, interrupt: &AtomicBool) -> std::io::Result<Signal> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    struct RestoreTerminal;
+    impl Drop for RestoreTerminal {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+        }
+    }
+    enable_raw_mode()?;
+    let _restore = RestoreTerminal;
+    let mut err = std::io::stderr();
+    write!(err, "{prompt}")?;
+    err.flush()?;
+    let mut line = String::new();
+    let result = loop {
+        if interrupt.load(Ordering::Acquire) {
+            break Signal::ExternalBreak(line);
+        }
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key.code {
+            KeyCode::Enter => break Signal::Success(line),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                break Signal::CtrlC
+            }
+            KeyCode::Char('d')
+                if line.is_empty() && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                break Signal::CtrlD
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                line.push(c);
+                write!(err, "{c}")?;
+            }
+            KeyCode::Backspace if line.pop().is_some() => write!(err, "\x08 \x08")?,
+            _ => {}
+        }
+        err.flush()?;
+    };
+    write!(err, "\r\n")?;
+    Ok(result)
 }
 
 fn wrap_with_root(cmd: &str, mode: RootMode) -> String {

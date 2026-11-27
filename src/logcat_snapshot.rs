@@ -73,6 +73,9 @@ pub fn fetch_snapshot(
         10,
     )?;
 
+    if capture.exit_code != 0 || capture.timed_out {
+        anyhow::bail!("读取设备 {serial} 的 logcat 失败 (exit={}): {}", capture.exit_code, String::from_utf8_lossy(&capture.stderr).trim());
+    }
     let text = String::from_utf8_lossy(&capture.stdout);
     let mut matched = Vec::new();
 

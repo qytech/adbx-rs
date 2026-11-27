@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn show_paths(store: &Store) -> Result<u8> {
+pub fn show_paths(dir: &Path) -> Result<u8> {
     let cache_dir = match std::env::var("ADBX_CACHE_DIR") {
         Ok(v) if !v.trim().is_empty() => Some(PathBuf::from(v.trim())),
         _ => dirs::cache_dir().map(|d| d.join("adbx")),
@@ -16,16 +16,16 @@ pub fn show_paths(store: &Store) -> Result<u8> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "-".to_string());
 
-    println!("配置目录:       {}", store.config_dir().display());
-    println!("设备配置文件:   {}", store.devices_config_path().display());
-    println!("会话状态文件:   {}", store.sessions_path().display());
-    println!("命令历史文件:   {}", store.history_path().display());
+    println!("配置目录:       {}", dir.display());
+    println!("设备配置文件:   {}", dir.join("devices.toml").display());
+    println!("会话状态文件:   {}", dir.join("sessions.json").display());
+    println!("命令历史文件:   {}", dir.join("history.jsonl").display());
     println!("补全缓存文件:   {}", cache_file);
     Ok(0)
 }
 
-pub fn show_config(store: &Store) -> Result<u8> {
-    let path = store.devices_config_path();
+pub fn show_config(dir: &Path) -> Result<u8> {
+    let path = dir.join("devices.toml");
     if !path.exists() {
         println!("(配置文件尚未生成: {}，可通过 `adbx alias` / `adbx group` / `adbx macro` 自动创建)", path.display());
         return Ok(0);
@@ -38,11 +38,16 @@ pub fn show_config(store: &Store) -> Result<u8> {
     Ok(0)
 }
 
-pub fn edit_config(store: &Store) -> Result<u8> {
-    let path = store.devices_config_path();
-    if !path.exists() {
-        store::atomic_write(&path, "# adbx devices.toml\n")?;
-    }
+pub fn edit_config(dir: &Path) -> Result<u8> {
+    let path = dir.join("devices.toml");
+    let original = store::read_optional(&path)?;
+    let draft = tempfile::Builder::new()
+        .prefix("adbx-edit-")
+        .suffix(".toml")
+        .tempfile_in(dir)?
+        .into_temp_path();
+    let initial = original.as_deref().unwrap_or("# adbx devices.toml\n");
+    fs::write(&draft, initial)?;
 
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -53,27 +58,53 @@ pub fn edit_config(store: &Store) -> Result<u8> {
         let Some((prog, args)) = parse_editor_command(&ed) else {
             bail!("无效的编辑器命令: {ed}");
         };
-        Command::new(prog).args(args).arg(&path).status()
+        Command::new(prog).args(args).arg(&draft).status()
     } else if cfg!(windows) {
-        Command::new("notepad").arg(&path).status()
+        Command::new("notepad").arg(&draft).status()
     } else {
-        Command::new("vi").arg(&path).status()
+        Command::new("vi").arg(&draft).status()
     }
-    .with_context(|| format!("无法打开编辑器编辑 {}", path.display()))?;
+    .with_context(|| format!("无法打开编辑器编辑 {}", draft.display()))?;
 
-    // 编辑结束后自动校验 TOML 语法，避免写坏配置
-    if let Ok(raw) = fs::read_to_string(&path) {
-        if let Err(e) = Store::validate_devices_toml(&raw) {
-            eprintln!("警告：编辑后的配置文件存在语法错误: {e:#}");
-            return Ok(1);
+    let edited = fs::read_to_string(&draft)?;
+    if !status.success() {
+        if edited != initial {
+            let saved = draft.keep()?;
+            bail!("编辑器退出失败，草稿保存在 {}", saved.display());
         }
+        return Ok(status.code().unwrap_or(1) as u8);
     }
-
-    Ok(status.code().unwrap_or(0) as u8)
+    if let Err(err) = Store::validate_devices_toml(&edited) {
+        let saved = draft.keep()?;
+        bail!("{err:#}；草稿保存在 {}", saved.display());
+    }
+    if edited == initial && original.is_some() {
+        return Ok(0);
+    }
+    let committed = store::with_store_lock(dir, || {
+        let latest = store::read_optional(&path)?;
+        if latest.as_deref() == Some(&edited) {
+            return Ok(true);
+        }
+        if latest != original {
+            return Ok(edited == initial);
+        }
+        store::atomic_write(&path, &edited)?;
+        Ok(true)
+    });
+    if !matches!(committed, Ok(true)) {
+        let saved = draft.keep()?;
+        committed.with_context(|| format!("提交配置失败，草稿保存在 {}", saved.display()))?;
+        bail!(
+            "编辑期间配置已被其他进程修改，已保留最新配置；你的草稿保存在 {}",
+            saved.display()
+        );
+    }
+    Ok(0)
 }
 
-pub fn export_config(store: &Store, out_file: &str) -> Result<u8> {
-    let path = store.devices_config_path();
+pub fn export_config(dir: &Path, out_file: &str) -> Result<u8> {
+    let path = dir.join("devices.toml");
     let raw = if path.exists() {
         fs::read_to_string(&path)?
     } else {
@@ -84,16 +115,16 @@ pub fn export_config(store: &Store, out_file: &str) -> Result<u8> {
     Ok(0)
 }
 
-pub fn import_config(store: &Store, in_file: &str) -> Result<u8> {
+pub fn import_config(dir: &Path, in_file: &str) -> Result<u8> {
     let raw = fs::read_to_string(in_file)
         .with_context(|| format!("读取待导入配置文件失败: {in_file}"))?;
     Store::validate_devices_toml(&raw)?;
-    store::atomic_write(&store.devices_config_path(), &raw)?;
-    println!("校验通过并已导入配置到: {}", store.devices_config_path().display());
+    store::with_store_lock(dir, || store::atomic_write(&dir.join("devices.toml"), &raw))?;
+    println!("校验通过并已导入配置到: {}", dir.join("devices.toml").display());
     Ok(0)
 }
 
-pub fn reset_config(store: &Store, assume_yes: bool) -> Result<u8> {
+pub fn reset_config(dir: &Path, assume_yes: bool) -> Result<u8> {
     if !assume_yes {
         if !selector::is_interactive_tty() {
             bail!("非交互终端重置配置需显式传入 `-y` / `--yes`");
@@ -107,8 +138,16 @@ pub fn reset_config(store: &Store, assume_yes: bool) -> Result<u8> {
             return Ok(0);
         }
     }
-    let _ = fs::remove_file(store.devices_config_path());
-    let _ = fs::remove_file(store.sessions_path());
+    store::with_store_lock(dir, || {
+        for name in ["devices.toml", "sessions.json"] {
+            if let Err(err) = fs::remove_file(dir.join(name)) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    return Err(err).with_context(|| format!("重置 {name} 失败"));
+                }
+            }
+        }
+        Ok(())
+    })?;
     println!("已重置 adbx 配置文件与会话状态。");
     Ok(0)
 }

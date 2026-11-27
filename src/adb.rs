@@ -3,7 +3,7 @@ use regex::Regex;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Once, OnceLock};
 use std::thread;
@@ -39,31 +39,40 @@ pub fn validate_package_name(pkg: &str) -> Result<&str> {
     Ok(trimmed)
 }
 
-/// MCP 安全模式只读命令白名单校验（禁止链式符号/重定向，仅放行已知只读诊断前缀）
+/// MCP 安全模式只接受字面量参数；同时具备读写能力的命令仅放行明确的查询形式。
 pub fn is_readonly_mcp_shell(cmd: &str) -> bool {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
+    if !cmd
+        .chars()
+        .all(|c| c.is_alphanumeric() || " \t_-/.:=,+%@".contains(c))
+    {
         return false;
     }
-    let forbidden = [';', '|', '&', '`', '$', '>', '<', '\n', '\r'];
-    if trimmed.chars().any(|c| forbidden.contains(&c)) {
-        return false;
-    }
-
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    if tokens.is_empty() {
-        return false;
-    }
-
-    match tokens[0] {
-        "getprop" | "dumpsys" | "ls" | "cat" | "ps" | "wm" | "ip" | "df" | "uname" | "id"
-        | "uptime" | "date" | "whoami" | "pidof" => true,
-        "top" => tokens.contains(&"-n"),
-        "pm" => matches!(tokens.get(1).copied(), Some("list" | "path" | "dump")),
-        "settings" => matches!(tokens.get(1).copied(), Some("get" | "list")),
+    let tokens: Vec<_> = cmd.split_whitespace().collect();
+    match tokens.as_slice() {
+        ["getprop" | "ls" | "cat" | "ps" | "df" | "uname" | "id" | "uptime" | "whoami" | "pidof", ..]
+        | ["pm", "list", ..]
+        | ["settings", "get", "system" | "secure" | "global", _]
+        | ["settings", "list", "system" | "secure" | "global"]
+        | ["wm", "size" | "density"]
+        | ["ip", "addr" | "link" | "route"]
+        | ["ip", "addr" | "link" | "route", "show", ..]
+        | ["date"]
+        | ["date", "-u"]
+        | ["dumpsys"]
+        | ["dumpsys", "-l" | "activity" | "battery" | "meminfo" | "package" | "window"]
+        | ["dumpsys", "activity", "top" | "activities" | "processes" | "services"]
+        | ["dumpsys", "window", "windows" | "displays"] => true,
+        ["pm", "path" | "dump", pkg] => validate_package_name(pkg).is_ok(),
+        ["dumpsys", "meminfo" | "package", pkg] => {
+            (*pkg == "android" || pkg.contains('.')) && validate_package_name(pkg).is_ok()
+        }
+        ["date", fmt] | ["date", "-u", fmt] => fmt.starts_with('+'),
+        ["top", "-n", n] | ["top", "-b", "-n", n] => n.parse::<u32>().is_ok_and(|n| n > 0),
         _ => false,
     }
 }
+
+pub const MANAGED_TOOLS_MARKER: &str = ".adbx-managed";
 
 /// 返回 adbx 托管下载的官方 Android Platform-Tools 中 `adb` 可执行文件路径
 pub fn managed_adb_path() -> Option<PathBuf> {
@@ -81,9 +90,13 @@ pub fn platform_tools_url() -> Result<&'static str> {
     {
         Ok("https://dl.google.com/android/repository/platform-tools-latest-darwin.zip")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         Ok("https://dl.google.com/android/repository/platform-tools-latest-linux.zip")
+    }
+    #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+    {
+        bail!("官方 Linux Platform-Tools 归档为 x86_64。请通过发行版包管理器安装当前架构的 adb，再运行 adbx。")
     }
     #[cfg(target_os = "windows")]
     {
@@ -138,6 +151,7 @@ pub fn find_adb_binary() -> Result<PathBuf> {
 /// 下载并安装 Google 官方 Android Platform-Tools 到 adbx 本地托管目录
 pub fn install_managed_platform_tools(force: bool) -> Result<PathBuf> {
     let target_adb = managed_adb_path().context("无法确定 adbx 本地数据目录")?;
+    let tools_dir = target_adb.parent().context("无效的 platform-tools 路径")?;
     let install_root = target_adb
         .parent()
         .and_then(|p| p.parent())
@@ -145,12 +159,19 @@ pub fn install_managed_platform_tools(force: bool) -> Result<PathBuf> {
         .to_path_buf();
 
     if !force && target_adb.is_file() {
+        verify_managed_adb(&target_adb)?;
         println!("已检测到托管的 adb: {}", target_adb.display());
         return Ok(target_adb);
     }
 
-    std::fs::create_dir_all(&install_root)?;
     let url = platform_tools_url()?;
+    std::fs::create_dir_all(&install_root)?;
+    // 只给 adbx 新建的子目录加标记，已有 SDK 即使被复用也不取得其所有权。
+    match std::fs::create_dir(tools_dir) {
+        Ok(()) => std::fs::write(tools_dir.join(MANAGED_TOOLS_MARKER), b"adbx\n")?,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && tools_dir.is_dir() => {}
+        Err(err) => return Err(err).context("无法创建托管 platform-tools 目录"),
+    }
     let zip_path = install_root.join("platform-tools-download.zip");
     println!("正在从 Google 官方源下载 Android Platform-Tools...");
     println!("  {url}");
@@ -206,8 +227,27 @@ pub fn install_managed_platform_tools(force: bool) -> Result<PathBuf> {
     if !target_adb.is_file() {
         bail!("未在解压目录中找到 {}", target_adb.display());
     }
+    verify_managed_adb(&target_adb)?;
     println!("已安装官方 adb 到: {}", target_adb.display());
     Ok(target_adb)
+}
+
+fn verify_managed_adb(path: &PathBuf) -> Result<()> {
+    let cap = run_captured_with_timeout(path, None, &["version".into()], 5).with_context(|| {
+        format!(
+            "运行 {} version 失败，请检查平台架构或使用系统 adb",
+            path.display()
+        )
+    })?;
+    if cap.exit_code != 0 || !String::from_utf8_lossy(&cap.stdout).contains("Android Debug Bridge")
+    {
+        bail!(
+            "{} 未通过 adb version 验证 (exit={})",
+            path.display(),
+            cap.exit_code
+        );
+    }
+    Ok(())
 }
 
 /// 查找 adb，若交互终端下缺失则提示一键自动下载安装官方 Platform-Tools
@@ -276,8 +316,21 @@ pub fn run_captured_with_timeout(
     args: &[String],
     timeout_secs: u64,
 ) -> Result<CommandCapture> {
+    run_captured_in(adb_path, serial, args, timeout_secs, None)
+}
+
+pub fn run_captured_in(
+    adb_path: &PathBuf,
+    serial: Option<&str>,
+    args: &[String],
+    timeout_secs: u64,
+    cwd: Option<&Path>,
+) -> Result<CommandCapture> {
     let started = Instant::now();
     let mut cmd = Command::new(adb_path);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
     if let Some(s) = serial {
         cmd.arg("-s").arg(s);
     }
@@ -338,19 +391,45 @@ pub fn run_captured_with_timeout(
     })
 }
 
+// ADB 客户端的顶层命令，包括 help 中省略的命令；设备上的命令由 shell 自行解析。
+pub const NATIVE_COMMANDS: &[&str] = &[
+    "abb", "attach", "backup", "bugreport", "connect", "detach", "devices", "disable-verity",
+    "disconnect", "emu", "enable-verity", "exec-in", "exec-out", "features", "fork-server",
+    "forward", "get-devpath", "get-serialno", "get-state", "help", "host-features", "inc-server",
+    "install", "install-multi-package", "install-multiple", "jdwp", "keygen", "kill-server",
+    "logcat", "lolcat", "longcat", "ls", "mdns", "nodaemon", "pair", "pubkey", "pull", "push",
+    "raw", "reboot", "reboot-bootloader", "reboot-fastboot", "reconnect", "remount", "rescue",
+    "restore", "reverse", "root", "server", "server-status", "shell", "sideload", "start-server",
+    "sync", "tcpip", "track-app", "track-devices", "track-jdwp", "transport-id", "uninstall",
+    "unroot", "usb", "version",
+];
+
+pub fn is_native_command(name: &str) -> bool {
+    if let Some(spec) = name.strip_prefix("wait-for-") {
+        let mut parts = spec.split('-').peekable();
+        if matches!(parts.peek(), Some(&("usb" | "local" | "any"))) {
+            parts.next();
+        }
+        return parts.peek().is_some() && parts.all(|state| {
+            matches!(state, "device" | "recovery" | "rescue" | "sideload" | "bootloader" | "disconnect" | "any")
+        });
+    }
+    NATIVE_COMMANDS.contains(&name) || matches!(name, "--help" | "--version" | "/?")
+}
+
 pub fn is_global_or_explicit_adb_command(args: &[String]) -> bool {
     if args.is_empty() {
         return true;
     }
-    if args
-        .iter()
-        .any(|a| matches!(a.as_str(), "-s" | "-d" | "-e" | "-t" | "-H" | "-P" | "-L"))
-    {
-        return true;
-    }
     matches!(
         args[0].as_str(),
-        "start-server"
+        "-s" | "-d"
+            | "-e"
+            | "-t"
+            | "-H"
+            | "-P"
+            | "-L"
+            | "start-server"
             | "kill-server"
             | "connect"
             | "disconnect"
@@ -363,7 +442,13 @@ pub fn is_global_or_explicit_adb_command(args: &[String]) -> bool {
     )
 }
 
+/// Native adb accepts a wait-for-* prefix followed by one ordinary command.
+pub fn after_wait_prefix(args: &[String]) -> &[String] {
+    if args.len() > 1 && args[0].starts_with("wait-for-") { &args[1..] } else { args }
+}
+
 pub fn is_dangerous_command(args: &[String]) -> bool {
+    let args = after_wait_prefix(args);
     if args.is_empty() {
         return false;
     }
@@ -392,9 +477,21 @@ pub fn ensure_ctrlc_ignored() {
 }
 
 pub fn run_passthrough(adb_path: &PathBuf, serial: Option<&str>, args: &[String]) -> Result<u8> {
+    run_passthrough_in(adb_path, serial, args, None)
+}
+
+pub fn run_passthrough_in(
+    adb_path: &PathBuf,
+    serial: Option<&str>,
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Result<u8> {
     ensure_ctrlc_ignored();
 
     let mut cmd = Command::new(adb_path);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
     if let Some(s) = serial {
         cmd.arg("-s").arg(s);
     }
@@ -415,6 +512,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recognizes_native_wait_commands() {
+        for name in ["wait-for-device", "wait-for-usb-recovery", "wait-for-any-device-disconnect"] {
+            assert!(is_native_command(name), "{name}");
+        }
+        for name in ["wait-for-", "wait-for-usb", "wait-for-any", "wait-for-usb-typo"] {
+            assert!(!is_native_command(name), "{name}");
+        }
+    }
+
+    #[test]
     fn validates_package_name_against_injection() {
         assert!(validate_package_name("com.example.app_1").is_ok());
         assert!(validate_package_name("com.foo; rm -rf /sdcard").is_err());
@@ -427,6 +534,11 @@ mod tests {
         assert!(is_readonly_mcp_shell("getprop ro.product.model"));
         assert!(is_readonly_mcp_shell("pm list packages -3"));
         assert!(is_readonly_mcp_shell("dumpsys activity top"));
+        assert!(is_readonly_mcp_shell("wm size"));
+        assert!(is_readonly_mcp_shell("date +%F"));
+        assert!(!is_readonly_mcp_shell("wm size 800x600"));
+        assert!(!is_readonly_mcp_shell("date 010100002030"));
+        assert!(!is_readonly_mcp_shell("getprop\n"));
         assert!(!is_readonly_mcp_shell("getprop; rm -rf /sdcard"));
         assert!(!is_readonly_mcp_shell("/system/bin/rm /sdcard/a"));
         assert!(!is_readonly_mcp_shell("pm clear com.example.app"));
@@ -458,9 +570,13 @@ mod tests {
 
     #[test]
     fn platform_tools_url_and_managed_path_are_valid() {
-        let url = platform_tools_url().unwrap();
-        assert!(url.starts_with("https://dl.google.com/android/repository/platform-tools-latest-"));
-        assert!(url.ends_with(".zip"));
+        if cfg!(all(target_os = "linux", not(target_arch = "x86_64"))) {
+            assert!(platform_tools_url().is_err());
+        } else {
+            let url = platform_tools_url().unwrap();
+            assert!(url.starts_with("https://dl.google.com/android/repository/platform-tools-latest-"));
+            assert!(url.ends_with(".zip"));
+        }
 
         let path = managed_adb_path().unwrap();
         let expected_name = if cfg!(windows) { "adb.exe" } else { "adb" };

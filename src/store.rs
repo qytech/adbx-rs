@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,9 +39,42 @@ struct DevicesConfig {
     log_highlights: BTreeMap<String, String>,
 }
 
+/// A fixed selection contains full transport serials resolved once at selection time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTarget {
+    Fixed(Vec<String>),
+    Group(String),
+    All,
+}
+
+impl DeviceTarget {
+    pub fn single(serial: &str) -> Self {
+        Self::Fixed(vec![serial.to_owned()])
+    }
+
+    pub fn single_serial(&self) -> Option<&str> {
+        match self {
+            Self::Fixed(list) if list.len() == 1 => Some(&list[0]),
+            _ => None,
+        }
+    }
+
+    pub fn spec(&self) -> String {
+        match self {
+            Self::Fixed(list) => list.join(","),
+            Self::Group(name) => name.clone(),
+            Self::All => "all".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionEntry {
+    // Keep the old display field readable by earlier adbx releases.
     serial: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<DeviceTarget>,
     updated_at: u64,
 }
 
@@ -78,59 +112,81 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
     fs::write(&tmp, content)?;
-    if fs::rename(&tmp, path).is_err() {
-        let _ = fs::write(path, content);
+    if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("无法替换 {}", path.display()));
     }
     Ok(())
 }
 
+pub fn config_dir() -> Result<PathBuf> {
+    let dir = match std::env::var("ADBX_CONFIG_DIR") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+        _ => dirs::config_dir()
+            .context("无法获取系统配置目录")?
+            .join("adbx"),
+    };
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub fn with_store_lock<T>(dir: &Path, change: impl FnOnce() -> Result<T>) -> Result<T> {
+    // 锁文件独立于被原子替换的数据文件，所有写入者都在同一个文件上加锁。
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(".adbx-state.lock"))?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let _guard = lock.write()?;
+    change()
+}
+
+pub(crate) fn read_optional(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("读取 {} 失败", path.display())),
+    }
+}
+
+fn read_devices(dir: &Path) -> Result<DevicesConfig> {
+    let path = dir.join("devices.toml");
+    match read_optional(&path)? {
+        Some(raw) => toml::from_str(&raw).with_context(|| {
+            format!(
+                "无法解析 {}，请用 adbx config edit 修复，或用 adbx config import 导入有效配置",
+                path.display()
+            )
+        }),
+        None => Ok(DevicesConfig::default()),
+    }
+}
+
+fn read_sessions(dir: &Path) -> Result<SessionState> {
+    let path = dir.join("sessions.json");
+    let mut state: SessionState = match read_optional(&path)? {
+        Some(raw) => {
+            serde_json::from_str(&raw).with_context(|| format!("无法解析 {}", path.display()))?
+        }
+        None => SessionState::default(),
+    };
+    let cutoff = now_secs().saturating_sub(SESSION_EXPIRE_SECS);
+    state.locked.retain(|_, entry| entry.updated_at >= cutoff);
+    Ok(state)
+}
+
 impl Store {
     pub fn load() -> Result<Self> {
-        let config_dir = match std::env::var("ADBX_CONFIG_DIR") {
-            Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
-            _ => dirs::config_dir()
-                .context("无法获取系统配置目录")?
-                .join("adbx"),
-        };
-        fs::create_dir_all(&config_dir)?;
-
-        let devices_path = config_dir.join("devices.toml");
-        let devices_cfg = if devices_path.exists() {
-            let raw = fs::read_to_string(&devices_path)?;
-            toml::from_str(&raw).unwrap_or_default()
-        } else {
-            DevicesConfig::default()
-        };
-
-        let state_path = config_dir.join("sessions.json");
-        let mut session_state = if state_path.exists() {
-            let raw = fs::read_to_string(&state_path)?;
-            serde_json::from_str(&raw).unwrap_or_default()
-        } else {
-            SessionState::default()
-        };
-
-        let cutoff = now_secs().saturating_sub(SESSION_EXPIRE_SECS);
-        session_state.locked.retain(|_, v| v.updated_at >= cutoff);
-
+        let config_dir = config_dir()?;
+        let devices_cfg = read_devices(&config_dir)?;
+        let session_state = read_sessions(&config_dir)?;
         Ok(Self {
             config_dir,
             devices_cfg,
             session_state,
         })
-    }
-
-    pub fn config_dir(&self) -> &Path {
-        &self.config_dir
-    }
-
-    pub fn devices_config_path(&self) -> PathBuf {
-        self.config_dir.join("devices.toml")
-    }
-
-    pub fn sessions_path(&self) -> PathBuf {
-        self.config_dir.join("sessions.json")
     }
 
     pub fn history_path(&self) -> PathBuf {
@@ -146,9 +202,19 @@ impl Store {
         Ok(())
     }
 
-    fn save_devices(&self) -> Result<()> {
-        let raw = toml::to_string_pretty(&self.devices_cfg)?;
-        atomic_write(&self.devices_config_path(), &raw)
+    fn update_devices(&mut self, edit: impl FnOnce(&mut DevicesConfig) -> bool) -> Result<bool> {
+        with_store_lock(&self.config_dir, || {
+            let mut cfg = read_devices(&self.config_dir)?;
+            let changed = edit(&mut cfg);
+            if changed {
+                atomic_write(
+                    &self.config_dir.join("devices.toml"),
+                    &toml::to_string_pretty(&cfg)?,
+                )?;
+            }
+            self.devices_cfg = cfg;
+            Ok(changed)
+        })
     }
 
     pub fn alias_for(&self, serial: &str) -> Option<&str> {
@@ -160,11 +226,12 @@ impl Store {
     }
 
     pub fn set_alias(&mut self, serial: &str, alias: &str) -> Result<()> {
-        self.devices_cfg.aliases.retain(|_, v| v != alias);
-        self.devices_cfg
-            .aliases
-            .insert(serial.to_string(), alias.to_string());
-        self.save_devices()
+        self.update_devices(|cfg| {
+            cfg.aliases.retain(|_, v| v != alias);
+            cfg.aliases.insert(serial.to_string(), alias.to_string());
+            true
+        })?;
+        Ok(())
     }
 
     pub fn group_members(&self, group_name: &str) -> Option<&[String]> {
@@ -176,23 +243,24 @@ impl Store {
     }
 
     pub fn set_group(&mut self, name: &str, members: Vec<String>) -> Result<()> {
-        self.devices_cfg.groups.insert(name.to_string(), members);
-        self.save_devices()
+        self.update_devices(|cfg| {
+            cfg.groups.insert(name.to_string(), members);
+            true
+        })?;
+        Ok(())
     }
 
     pub fn remove_group(&mut self, name: &str) -> Result<bool> {
-        let removed = self.devices_cfg.groups.remove(name).is_some();
-        if removed {
-            self.save_devices()?;
-        }
-        Ok(removed)
+        self.update_devices(|cfg| cfg.groups.remove(name).is_some())
     }
 
     pub fn save_wifi_host(&mut self, label: &str, endpoint: &str) -> Result<()> {
-        self.devices_cfg
-            .wifi_hosts
-            .insert(label.to_string(), endpoint.to_string());
-        self.save_devices()
+        self.update_devices(|cfg| {
+            cfg.wifi_hosts
+                .insert(label.to_string(), endpoint.to_string());
+            true
+        })?;
+        Ok(())
     }
 
     pub fn list_wifi_hosts(&self) -> &BTreeMap<String, String> {
@@ -204,21 +272,22 @@ impl Store {
     }
 
     pub fn add_port_rule(&mut self, rule: PortRule) -> Result<()> {
-        if !self.devices_cfg.ports.contains(&rule) {
-            self.devices_cfg.ports.push(rule);
-            self.save_devices()?;
-        }
+        self.update_devices(|cfg| {
+            if cfg.ports.contains(&rule) {
+                return false;
+            }
+            cfg.ports.push(rule);
+            true
+        })?;
         Ok(())
     }
 
     pub fn remove_port_rule(&mut self, rule: &PortRule) -> Result<bool> {
-        let before = self.devices_cfg.ports.len();
-        self.devices_cfg.ports.retain(|r| r != rule);
-        let removed = self.devices_cfg.ports.len() != before;
-        if removed {
-            self.save_devices()?;
-        }
-        Ok(removed)
+        self.update_devices(|cfg| {
+            let before = cfg.ports.len();
+            cfg.ports.retain(|r| r != rule);
+            before != cfg.ports.len()
+        })
     }
 
     pub fn list_macros(&self) -> &BTreeMap<String, Vec<String>> {
@@ -230,40 +299,111 @@ impl Store {
     }
 
     pub fn set_macro(&mut self, name: &str, args: Vec<String>) -> Result<()> {
-        self.devices_cfg.macros.insert(name.to_string(), args);
-        self.save_devices()
+        self.update_devices(|cfg| {
+            cfg.macros.insert(name.to_string(), args);
+            true
+        })?;
+        Ok(())
     }
 
     pub fn remove_macro(&mut self, name: &str) -> Result<bool> {
-        let removed = self.devices_cfg.macros.remove(name).is_some();
-        if removed {
-            self.save_devices()?;
-        }
-        Ok(removed)
+        self.update_devices(|cfg| cfg.macros.remove(name).is_some())
     }
 
     pub fn list_log_highlights(&self) -> &BTreeMap<String, String> {
         &self.devices_cfg.log_highlights
     }
 
-    pub fn get_session_device(&self, session_id: &str) -> Option<String> {
-        self.session_state.locked.get(session_id).map(|e| e.serial.clone())
+    pub fn session_target(&self, id: &str) -> Result<Option<DeviceTarget>> {
+        let Some(entry) = self.session_state.locked.get(id) else {
+            return Ok(None);
+        };
+        if let Some(target) = &entry.target {
+            return Ok(Some(target.clone()));
+        }
+        // Old sessions stored a single string. A name shared with a group cannot
+        // safely be recovered if the originally locked device is now offline.
+        let raw = &entry.serial;
+        if raw == "all" {
+            return Ok(Some(DeviceTarget::All));
+        }
+        if self.group_members(raw).is_some() {
+            bail!("旧会话锁 {raw} 未记录目标类型，请用 adbx use --group {raw} 或 adbx use <完整序列号> 重新锁定");
+        }
+        Ok(Some(DeviceTarget::Fixed(
+            raw.split(',').map(str::to_owned).collect(),
+        )))
     }
 
-    pub fn set_session_device(&mut self, session_id: &str, serial: &str) -> Result<()> {
-        self.session_state.locked.insert(
-            session_id.to_string(),
-            SessionEntry {
-                serial: serial.to_string(),
-                updated_at: now_secs(),
-            },
-        );
-        self.save_sessions()
+    pub fn select_target(&self, input: &str, online: &[DeviceInfo]) -> Result<DeviceTarget> {
+        let spec = input.trim_start_matches('@');
+        if spec.eq_ignore_ascii_case("all") {
+            return Ok(DeviceTarget::All);
+        }
+        if self.group_members(spec).is_some()
+            && !online.iter().any(|d| d.serial == spec)
+            && !self.devices_cfg.aliases.values().any(|a| a == spec)
+        {
+            return Ok(DeviceTarget::Group(spec.to_owned()));
+        }
+        self.select_devices(spec, online)
+    }
+
+    pub fn select_devices(&self, spec: &str, online: &[DeviceInfo]) -> Result<DeviceTarget> {
+        let mut serials = Vec::new();
+        for part in spec.split(',').map(str::trim) {
+            if part.is_empty() {
+                bail!("目标序列号不能为空");
+            }
+            let serial = if online.iter().any(|d| d.serial == part) {
+                part.to_owned()
+            } else {
+                self.resolve_input_to_serial(part, online)?
+            };
+            if !online.iter().any(|d| d.serial == serial) {
+                bail!("设备 {serial} 未在线");
+            }
+            if !serials.contains(&serial) {
+                serials.push(serial);
+            }
+        }
+        Ok(DeviceTarget::Fixed(serials))
+    }
+
+    pub fn locked_devices(
+        &self,
+        target: &DeviceTarget,
+        online: &[DeviceInfo],
+    ) -> Result<Vec<DeviceInfo>> {
+        match target {
+            DeviceTarget::All => Ok(online.to_vec()),
+            DeviceTarget::Group(name) => self.expand_group_online(name, online),
+            DeviceTarget::Fixed(serials) => serials.iter().map(|serial| {
+                online.iter().find(|d| &d.serial == serial).cloned().with_context(|| format!(
+                    "当前会话锁定的设备 {} ({serial}) 未在线。请重新连接，或使用 adbx use 重新选择、adbx unuse 解除锁定。",
+                    self.display_label(serial)
+                ))
+            }).collect(),
+        }
+    }
+
+    pub fn set_session_target(&mut self, id: &str, target: &DeviceTarget) -> Result<()> {
+        self.update_sessions(|state| {
+            state.locked.insert(
+                id.to_owned(),
+                SessionEntry {
+                    serial: target.spec(),
+                    target: Some(target.clone()),
+                    updated_at: now_secs(),
+                },
+            );
+        })
     }
 
     pub fn clear_session_device(&mut self, session_id: &str) -> Result<()> {
-        self.session_state.locked.remove(session_id);
-        self.save_sessions()
+        self.update_sessions(|state| {
+            state.locked.remove(session_id);
+        })
     }
 
     pub fn get_device_flags(&self, serial: &str) -> DeviceRuntimeFlags {
@@ -274,17 +414,25 @@ impl Store {
             .unwrap_or_default()
     }
 
-    pub fn set_device_flags(&mut self, serial: &str, flags: DeviceRuntimeFlags) -> Result<()> {
-        self.session_state
-            .device_flags
-            .insert(serial.to_string(), flags);
-        self.save_sessions()
+    pub fn update_device_flags(
+        &mut self,
+        serial: &str,
+        edit: impl FnOnce(&mut DeviceRuntimeFlags),
+    ) -> Result<()> {
+        self.update_sessions(|state| edit(state.device_flags.entry(serial.to_owned()).or_default()))
     }
 
-    fn save_sessions(&self) -> Result<()> {
-        let raw = serde_json::to_string_pretty(&self.session_state)?;
-        atomic_write(&self.config_dir.join("sessions.json"), &raw)?;
-        Ok(())
+    fn update_sessions(&mut self, edit: impl FnOnce(&mut SessionState)) -> Result<()> {
+        with_store_lock(&self.config_dir, || {
+            let mut state = read_sessions(&self.config_dir)?;
+            edit(&mut state);
+            atomic_write(
+                &self.config_dir.join("sessions.json"),
+                &serde_json::to_string_pretty(&state)?,
+            )?;
+            self.session_state = state;
+            Ok(())
+        })
     }
 
     pub fn resolve_input_to_serial(&self, input: &str, devices: &[DeviceInfo]) -> Result<String> {
@@ -364,6 +512,33 @@ mod tests {
     }
 
     #[test]
+    fn legacy_lock_requires_reselection_when_its_type_is_ambiguous() {
+        let mut store = sample_store();
+        let entry = |serial: &str| SessionEntry {
+            serial: serial.to_owned(),
+            updated_at: now_secs(),
+            target: None,
+        };
+        store
+            .session_state
+            .locked
+            .insert("terminal".into(), entry("QA"));
+        assert!(store
+            .session_target("terminal")
+            .unwrap_err()
+            .to_string()
+            .contains("use --group"));
+        store
+            .session_state
+            .locked
+            .insert("terminal".into(), entry("A,B"));
+        assert_eq!(
+            store.session_target("terminal").unwrap(),
+            Some(DeviceTarget::Fixed(vec!["A".into(), "B".into()]))
+        );
+    }
+
+    #[test]
     fn validates_devices_toml_and_persists_all_store_sections() {
         assert!(Store::validate_devices_toml("[aliases]\nDEV1 = \"pixel\"\n").is_ok());
         assert!(Store::validate_devices_toml("broken = [unclosed").is_err());
@@ -409,19 +584,20 @@ mod tests {
             Some("192.168.1.50:5555")
         );
 
-        st.set_session_device("sess-1", "DEV001").unwrap();
-        assert_eq!(st.get_session_device("sess-1").as_deref(), Some("DEV001"));
+        st.set_session_target("sess-1", &DeviceTarget::single("DEV001")).unwrap();
+        assert_eq!(st.session_target("sess-1").unwrap().as_ref().and_then(DeviceTarget::single_serial), Some("DEV001"));
+        let mut stale = sample_store();
+        stale.config_dir = dir.clone();
+        stale.set_session_target("sess-2", &DeviceTarget::single("DEV002")).unwrap();
+        assert_eq!(stale.session_target("sess-1").unwrap().as_ref().and_then(DeviceTarget::single_serial), Some("DEV001"));
         st.clear_session_device("sess-1").unwrap();
-        assert!(st.get_session_device("sess-1").is_none());
+        assert!(st.session_target("sess-1").unwrap().is_none());
+        assert_eq!(st.session_target("sess-2").unwrap().as_ref().and_then(DeviceTarget::single_serial), Some("DEV002"));
 
-        st.set_device_flags(
-            "DEV001",
-            DeviceRuntimeFlags {
-                wants_root: true,
-                wants_remount: true,
-            },
-        )
-        .unwrap();
+        st.update_device_flags("DEV001", |flags| {
+            flags.wants_root = true;
+            flags.wants_remount = true;
+        }).unwrap();
         let flags = st.get_device_flags("DEV001");
         assert!(flags.wants_root && flags.wants_remount);
 

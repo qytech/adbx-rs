@@ -1,4 +1,5 @@
 use crate::adb;
+use crate::broadcast;
 use crate::selector;
 use crate::store::{self, Store};
 use anyhow::{bail, Result};
@@ -7,7 +8,7 @@ use dialoguer::{Confirm, FuzzySelect};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_HISTORY_ENTRIES: usize = 1_000;
 
@@ -15,19 +16,75 @@ const MAX_HISTORY_ENTRIES: usize = 1_000;
 pub struct HistoryEntry {
     pub timestamp: String,
     pub target: String,
+    /// Exact adb serials at execution time. Older records only stored a display label.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serials: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
     pub args: Vec<String>,
     pub exit_code: u8,
     pub elapsed_ms: u128,
 }
 
+fn needs_host_directory(args: &[String]) -> bool {
+    let args = adb::after_wait_prefix(args);
+    let Some((cmd, rest)) = args.split_first() else {
+        return false;
+    };
+    let relative = |arg: &String| Path::new(arg).is_relative();
+    match cmd.as_str() {
+        "push" | "pull" => {
+            let Ok(indices) = crate::pull::transfer_operands(args) else {
+                return true;
+            };
+            let Some((last, sources)) = indices.split_last() else {
+                return false;
+            };
+            if cmd == "pull" {
+                sources.is_empty() || relative(&args[*last])
+            } else {
+                sources.iter().any(|i| relative(&args[*i]))
+            }
+        }
+        "install" | "restore" | "sideload" | "keygen" | "pubkey" => {
+            rest.last().is_some_and(relative)
+        }
+        "install-multiple" | "install-multi-package" => {
+            rest.iter().any(|s| !s.starts_with('-') && relative(s))
+        }
+        "bugreport" => rest.first().is_none_or(relative),
+        "backup" => rest
+            .windows(2)
+            .find(|pair| pair[0] == "-f")
+            .is_none_or(|pair| relative(&pair[1])),
+        "sync" => {
+            std::env::var_os("ANDROID_PRODUCT_OUT").is_some_and(|out| Path::new(&out).is_relative())
+        }
+        _ => false,
+    }
+}
+
 /// 追加一条命令历史到 history.jsonl（超限时自动滚动裁剪保留最近 1000 条）
-pub fn record(store: &Store, target: &str, args: &[String], exit_code: u8, elapsed_ms: u128) {
+pub fn record(
+    store: &Store,
+    target: &str,
+    serials: &[String],
+    args: &[String],
+    exit_code: u8,
+    elapsed_ms: u128,
+) {
     if args.is_empty() {
         return;
     }
     let entry = HistoryEntry {
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         target: target.to_string(),
+        serials: serials.to_vec(),
+        cwd: if needs_host_directory(args) {
+            std::env::current_dir().ok()
+        } else {
+            None
+        },
         args: args.to_vec(),
         exit_code,
         elapsed_ms,
@@ -36,10 +93,15 @@ pub fn record(store: &Store, target: &str, args: &[String], exit_code: u8, elaps
     let Ok(line) = serde_json::to_string(&entry) else {
         return;
     };
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{line}");
+    if let Some(dir) = path.parent() {
+        let _ = store::with_store_lock(dir, || {
+            let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+            writeln!(file, "{line}")?;
+            drop(file);
+            trim_if_needed(&path);
+            Ok(())
+        });
     }
-    trim_if_needed(&path);
 }
 
 fn trim_if_needed(path: &Path) {
@@ -81,7 +143,12 @@ pub fn filter_entries(
         .into_iter()
         .filter(|e| {
             if let Some(ref dq) = dev_q {
-                if !e.target.to_ascii_lowercase().contains(dq) {
+                if !e.target.to_ascii_lowercase().contains(dq)
+                    && !e
+                        .serials
+                        .iter()
+                        .any(|s| s.to_ascii_lowercase().contains(dq))
+                {
                     return false;
                 }
             }
@@ -139,6 +206,8 @@ pub fn replay_history(
     adb_path: &std::path::PathBuf,
     store: &Store,
     limit: usize,
+    explicit_serials: &[String],
+    explicit_cwd: Option<&Path>,
 ) -> Result<u8> {
     if !selector::is_interactive_tty() {
         bail!("非交互终端不支持 `adbx history replay`，请使用 `adbx history list --json`");
@@ -153,10 +222,15 @@ pub fn replay_history(
     let items: Vec<String> = entries
         .iter()
         .map(|e| {
+            let targets = match e.serials.as_slice() {
+                [] => format!("{}（旧记录，未保存序列号）", e.target),
+                [single] if single == &e.target => e.target.clone(),
+                serials => format!("{} [{}]", e.target, serials.join(", ")),
+            };
             format!(
                 "{} | {:<12} | exit={} | adb {}",
                 e.timestamp,
-                e.target,
+                targets,
                 e.exit_code,
                 e.args.join(" ")
             )
@@ -170,24 +244,76 @@ pub fn replay_history(
         .interact()?;
 
     let chosen = &entries[idx];
-    let online: Vec<_> = adb::list_devices(adb_path)?
-        .into_iter()
-        .filter(|d| d.state == "device")
-        .collect();
+    let serials = if explicit_serials.is_empty() {
+        &chosen.serials
+    } else {
+        explicit_serials
+    };
+    replay_command(
+        adb_path,
+        store,
+        serials,
+        &chosen.args,
+        explicit_cwd.or(chosen.cwd.as_deref()),
+    )
+}
 
-    let target_serial = store
-        .resolve_input_to_serial(chosen.target.trim_start_matches('@'), &online)
-        .ok();
-
-    eprintln!(
-        "[adbx replay] -> adb {} {}",
-        target_serial
-            .as_deref()
-            .map(|s| format!("-s {s}"))
-            .unwrap_or_default(),
-        chosen.args.join(" ")
-    );
-    adb::run_passthrough(adb_path, target_serial.as_deref(), &chosen.args)
+/// Replay and exported scripts share the exact-match preflight, including for a
+/// batch: one missing original target must stop the whole command.
+pub fn replay_command(
+    adb_path: &std::path::PathBuf,
+    store: &Store,
+    serials: &[String],
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Result<u8> {
+    if serials.is_empty() {
+        bail!("缺少原始设备序列号。要重放旧记录，请使用 adbx history replay --serial <完整序列号> 显式选定设备");
+    }
+    if args.first().is_none_or(|a| a.starts_with('-'))
+        || adb::is_global_or_explicit_adb_command(args)
+    {
+        bail!("历史重放需要绑定设备的 adb 子命令");
+    }
+    let cwd = if cwd.is_some() || needs_host_directory(args) {
+        let dir = cwd.ok_or_else(|| {
+            anyhow::anyhow!("这条命令使用本地相对路径，但未记录原工作目录。请用 --cwd 显式指定目录")
+        })?;
+        if !dir.is_dir() {
+            bail!("历史重放工作目录不存在或不是目录：{}", dir.display());
+        }
+        Some(std::path::absolute(dir)?)
+    } else {
+        None
+    };
+    // Resolve the executable before changing a child process's working directory.
+    let adb_path = &std::path::absolute(adb_path)?;
+    let online = adb::list_devices(adb_path)?;
+    let mut targets = Vec::new();
+    for serial in serials {
+        if !online
+            .iter()
+            .any(|d| d.state == "device" && &d.serial == serial)
+        {
+            bail!("历史重放目标 {serial} 未在线，本次重放已停止");
+        }
+        if !targets.contains(serial) {
+            targets.push(serial.clone());
+        }
+    }
+    if let [serial] = targets.as_slice() {
+        let preview = args.join(" ");
+        if adb::is_dangerous_command(args)
+            && !selector::confirm_dangerous(&store.display_label(serial), serial, &preview)?
+        {
+            return Ok(0);
+        }
+        eprintln!("[adbx replay] -> adb -s {serial} {preview}");
+        return adb::run_passthrough_in(adb_path, Some(serial), args, cwd.as_deref());
+    }
+    let mut opts = broadcast::parse_broadcast_args(args)?;
+    opts.cwd = cwd;
+    broadcast::run_on_serials(&targets, opts, adb_path, store, None)
 }
 
 pub fn export_history(store: &Store, out_file: &str) -> Result<u8> {
@@ -195,20 +321,33 @@ pub fn export_history(store: &Store, out_file: &str) -> Result<u8> {
     let content = if out_file.ends_with(".json") {
         serde_json::to_string_pretty(&entries)?
     } else if out_file.ends_with(".sh") {
-        let mut lines = vec!["#!/usr/bin/env bash".to_string()];
+        let mut lines = vec!["#!/usr/bin/env bash".to_string(), "set -e".to_string()];
         for e in &entries {
-            lines.push(format!("# {} [{}]", e.timestamp, e.target));
-            let clean_target = e.target.trim_start_matches('@');
-            let escaped_args: Vec<String> = e.args.iter().map(|a| shell_escape_arg(a)).collect();
-            if clean_target.eq_ignore_ascii_case("all") {
-                lines.push(format!("adbx --all {}", escaped_args.join(" ")));
-            } else {
-                lines.push(format!(
-                    "adbx --device {} {}",
-                    shell_escape_arg(clean_target),
-                    escaped_args.join(" ")
-                ));
+            lines.extend(
+                format!("{} [{}]", e.timestamp, e.target)
+                    .lines()
+                    .map(|s| format!("# {s}")),
+            );
+            if e.serials.is_empty() {
+                lines.push(
+                    "# 旧记录未保存序列号，请先在此行的 -- 前添加 --serial <完整序列号>".into(),
+                );
             }
+            let mut parts = vec!["adbx history replay".to_owned()];
+            for serial in &e.serials {
+                parts.push(format!("--serial={}", shell_escape_arg(serial)));
+            }
+            if let Some(dir) = &e.cwd {
+                let path = dir
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("无法导出非 UTF-8 工作目录"))?;
+                parts.push(format!("--cwd={}", shell_escape_arg(path)));
+            } else if needs_host_directory(&e.args) {
+                lines.push("# 旧记录未保存工作目录，请添加 --cwd <目录> 后再运行".into());
+            }
+            parts.push("--".into());
+            parts.extend(e.args.iter().map(|a| shell_escape_arg(a)));
+            lines.push(parts.join(" "));
         }
         format!("{}\n", lines.join("\n"))
     } else {
@@ -238,7 +377,14 @@ pub fn clear_history(store: &Store, assume_yes: bool) -> Result<u8> {
             return Ok(0);
         }
     }
-    let _ = fs::remove_file(store.history_path());
+    let path = store.history_path();
+    store::with_store_lock(
+        path.parent().expect("history file has a config directory"),
+        || match fs::remove_file(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => Ok(result?),
+        },
+    )?;
     println!("已清空命令历史文件。");
     Ok(0)
 }
